@@ -40,7 +40,26 @@ if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(TEMPO_SEARCH_PATH)) {
   process.exit(1);
 }
 
-console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)}`);
+const GRAFANA_BASE_URL = (process.env.GRAFANA_BASE_URL || '').replace(/\/$/, '');
+const VAULT_BASE_URL = (process.env.VAULT_BASE_URL || '').replace(/\/$/, '');
+const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || '').replace(/\/$/, '');
+const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES || '*').trim();
+
+// Validate URLs are well-formed if provided
+if (GRAFANA_BASE_URL && !/^https?:\/\//.test(GRAFANA_BASE_URL)) {
+  console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(GRAFANA_BASE_URL)}`);
+  process.exit(1);
+}
+if (VAULT_BASE_URL && !/^https?:\/\//.test(VAULT_BASE_URL)) {
+  console.error(`[FATAL] VAULT_BASE_URL must be an http(s) URL, got: ${JSON.stringify(VAULT_BASE_URL)}`);
+  process.exit(1);
+}
+if (DEPLOYMENT_CONFIG_REPO_URL && !/^https?:\/\//.test(DEPLOYMENT_CONFIG_REPO_URL)) {
+  console.error(`[FATAL] DEPLOYMENT_CONFIG_REPO_URL must be an http(s) URL, got: ${JSON.stringify(DEPLOYMENT_CONFIG_REPO_URL)}`);
+  process.exit(1);
+}
+
+console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)} ALLOWED_NAMESPACES=${JSON.stringify(ALLOWED_NAMESPACES)}`);
 
 function logDebug(message, meta) {
   if (LOG_LEVEL === 'DEBUG') {
@@ -92,6 +111,79 @@ async function fetchJson(url) {
 
 app.get('/healthz', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+app.get('/api/links', (req, res) => {
+  // Extract app context from headers
+  const appNameHeader = req.get('Argocd-Application-Name') || '';
+  const projectName = req.get('Argocd-Project-Name') || '';
+
+  if (!appNameHeader || !appNameHeader.includes(':')) {
+    return res.status(400).json({
+      status: 'error',
+      errorType: 'invalid_request',
+      error: 'Argocd-Application-Name header must be in format namespace:appName'
+    });
+  }
+
+  const [namespace, appName] = appNameHeader.split(':', 2);
+
+  // Check if namespace is allowed
+  if (ALLOWED_NAMESPACES !== '*') {
+    const allowedList = ALLOWED_NAMESPACES.split(',').map(s => s.trim());
+    if (!allowedList.includes(namespace)) {
+      return res.status(403).json({
+        status: 'error',
+        errorType: 'forbidden',
+        error: `Namespace ${namespace} is not allowed`
+      });
+    }
+  }
+
+  logDebug('links request', { namespace, appName, projectName });
+
+  // Build link objects based on configured services
+  // In Phase 1.1, these are hardcoded. Phase 1.3 will add k8s querying to populate pod/deployment names.
+  const links = [];
+
+  if (GRAFANA_BASE_URL) {
+    links.push({
+      id: 'logs',
+      title: 'Logs',
+      icon: 'fa-file-lines',
+      url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace)}&var-pod=${encodeURIComponent(appName)}`,
+      category: 'logs'
+    });
+    links.push({
+      id: 'traces',
+      title: 'Traces',
+      icon: 'fa-timeline',
+      url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace)}&var-service=${encodeURIComponent(appName)}`,
+      category: 'traces'
+    });
+  }
+
+  if (VAULT_BASE_URL) {
+    links.push({
+      id: 'vault',
+      title: 'Vault Secrets',
+      icon: 'fa-key',
+      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace)}/${encodeURIComponent(appName)}/`,
+      category: 'vault'
+    });
+  }
+
+  if (DEPLOYMENT_CONFIG_REPO_URL) {
+    links.push({
+      id: 'deployment-config',
+      title: 'Deployment Config',
+      icon: 'fa-code',
+      url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(appName)}/`,
+      category: 'deployment-config'
+    });
+  }
+
+  return res.status(200).json(links);
 });
 
 app.get('/api/datasources/proxy/prometheus/api/v1/query', async (req, res) => {
