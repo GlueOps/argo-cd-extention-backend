@@ -1,0 +1,16 @@
+{
+  "name": "argocd-extension-backend-api",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Backend API for the Argo CD extension",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
