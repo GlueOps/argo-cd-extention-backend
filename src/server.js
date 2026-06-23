@@ -199,47 +199,76 @@ app.get('/api/links', async (req, res) => {
   const primaryPodName = podNames.length > 0 ? podNames[0] : appName;
   const primaryDeploymentName = deploymentNames.length > 0 ? deploymentNames[0] : appName;
 
-  // Build link objects based on configured services
-  const links = [];
+  // Build categories response matching UI extension expectations
+  const categories = [];
 
   if (GRAFANA_BASE_URL) {
-    links.push({
+    categories.push({
       id: 'logs',
-      title: 'Logs',
-      icon: 'fa-file-lines',
-      url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace)}&var-pod=${encodeURIComponent(primaryPodName)}`,
-      category: 'logs'
+      label: 'Logs',
+      icon: '📋',
+      status: 'ok',
+      links: [{
+        url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace)}&var-pod=${encodeURIComponent(primaryPodName)}`,
+        label: 'View Logs'
+      }]
     });
-    links.push({
+    categories.push({
       id: 'traces',
-      title: 'Traces',
-      icon: 'fa-timeline',
-      url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace)}&var-service=${encodeURIComponent(primaryDeploymentName)}`,
-      category: 'traces'
+      label: 'Traces',
+      icon: '⏱️',
+      status: 'ok',
+      links: [{
+        url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace)}&var-service=${encodeURIComponent(primaryDeploymentName)}`,
+        label: 'View Traces'
+      }]
     });
   }
 
   if (VAULT_BASE_URL) {
-    links.push({
+    categories.push({
       id: 'vault',
-      title: 'Vault Secrets',
-      icon: 'fa-key',
-      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace)}/${encodeURIComponent(primaryDeploymentName)}/`,
-      category: 'vault'
+      label: 'Vault Secrets',
+      icon: '🔐',
+      status: 'ok',
+      links: [{
+        url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace)}/${encodeURIComponent(primaryDeploymentName)}/`,
+        label: 'View Secrets'
+      }]
     });
   }
 
   if (DEPLOYMENT_CONFIG_REPO_URL) {
-    links.push({
+    categories.push({
       id: 'deployment-config',
-      title: 'Deployment Config',
-      icon: 'fa-code',
-      url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(primaryDeploymentName)}/`,
-      category: 'deployment-config'
+      label: 'Config Repo',
+      icon: '⚙️',
+      status: 'ok',
+      links: [{
+        url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(primaryDeploymentName)}/`,
+        label: 'View Config'
+      }]
     });
   }
 
-  return res.status(200).json(links);
+  // If no services are configured, return an empty state
+  if (categories.length === 0) {
+    categories.push({
+      id: 'unconfigured',
+      label: 'No Services Configured',
+      icon: '⚠️',
+      status: 'empty',
+      message: 'No external services (Grafana, Vault, etc.) are configured'
+    });
+  }
+
+  return res.status(200).json({
+    categories,
+    metadata: {
+      last_updated: new Date().toISOString(),
+      max_rows: 4
+    }
+  });
 });
 
 app.get('/api/datasources/proxy/prometheus/api/v1/query', async (req, res) => {
