@@ -32,6 +32,14 @@ spec:
               value: ""
             - name: LOG_LEVEL
               value: "INFO"
+            - name: GRAFANA_BASE_URL
+              value: "https://grafana.nonprod.venus.onglueops.rocks"
+            - name: VAULT_BASE_URL
+              value: "https://vault.nonprod.venus.onglueops.rocks"
+            - name: DEPLOYMENT_CONFIG_REPO_URL
+              value: "https://github.com/GlueOps/deployment-configurations"
+            - name: ALLOWED_NAMESPACES
+              value: "nonprod"
           readinessProbe:
             httpGet:
               path: /healthz

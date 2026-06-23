@@ -32,6 +32,14 @@ spec:
               value: ""
             - name: LOG_LEVEL
               value: "INFO"
+            - name: GRAFANA_BASE_URL
+              value: ""
+            - name: VAULT_BASE_URL
+              value: ""
+            - name: DEPLOYMENT_CONFIG_REPO_URL
+              value: ""
+            - name: ALLOWED_NAMESPACES
+              value: "*"
           readinessProbe:
             httpGet:
               path: /healthz
