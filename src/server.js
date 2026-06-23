@@ -1,4 +1,5 @@
 const express = require('express');
+const k8s = require('@kubernetes/client-node');
 
 const app = express();
 
@@ -67,6 +68,55 @@ function logDebug(message, meta) {
   }
 }
 
+// Initialize Kubernetes client (in-cluster config)
+let k8sApi = null;
+let k8sAppsApi = null;
+try {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromCluster();
+  k8sApi = kc.makeApiClient(k8s.CoreV1Api);
+  k8sAppsApi = kc.makeApiClient(k8s.AppsV1Api);
+  logDebug('Kubernetes client initialized');
+} catch (err) {
+  logDebug('Kubernetes client initialization failed (running outside cluster?)', err.message);
+  // This is OK - we'll gracefully degrade if k8s client isn't available
+}
+
+// Helper to query pods/deployments for a given app
+async function getAppResources(namespace, appName) {
+  if (!k8sApi || !k8sAppsApi) return { podNames: [], deploymentNames: [] };
+  
+  try {
+    // List pods matching the app name label or name pattern
+    const podsResp = await k8sApi.listNamespacedPod(namespace);
+    const podNames = (podsResp.body.items || [])
+      .filter(pod => 
+        // Match pod name starting with app name or pod has app label matching
+        pod.metadata.name.startsWith(appName.substring(0, Math.min(20, appName.length))) ||
+        pod.metadata.labels?.app === appName ||
+        pod.metadata.labels?.['app.kubernetes.io/name'] === appName
+      )
+      .map(pod => pod.metadata.name);
+    
+    // List deployments matching the app name
+    const deploysResp = await k8sAppsApi.listNamespacedDeployment(namespace);
+    const deploymentNames = (deploysResp.body.items || [])
+      .filter(deploy =>
+        deploy.metadata.name === appName ||
+        deploy.metadata.name.startsWith(appName) ||
+        deploy.metadata.labels?.app === appName ||
+        deploy.metadata.labels?.['app.kubernetes.io/name'] === appName
+      )
+      .map(deploy => deploy.metadata.name);
+    
+    logDebug('app resources queried', { namespace, appName, podNames, deploymentNames });
+    return { podNames, deploymentNames };
+  } catch (err) {
+    logDebug('getAppResources failed', err.message);
+    return { podNames: [], deploymentNames: [] };
+  }
+}
+
 function buildUrl(base, path, query) {
   const trimmedPath = path.trim();
   if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(trimmedPath)) {
@@ -113,7 +163,7 @@ app.get('/healthz', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.get('/api/links', (req, res) => {
+app.get('/api/links', async (req, res) => {
   // Extract app context from headers
   const appNameHeader = req.get('Argocd-Application-Name') || '';
   const projectName = req.get('Argocd-Project-Name') || '';
@@ -142,8 +192,14 @@ app.get('/api/links', (req, res) => {
 
   logDebug('links request', { namespace, appName, projectName });
 
+  // Query Kubernetes for pods and deployments (Phase 1.3)
+  const { podNames, deploymentNames } = await getAppResources(namespace, appName);
+  
+  // Use first pod name if available, otherwise fall back to appName
+  const primaryPodName = podNames.length > 0 ? podNames[0] : appName;
+  const primaryDeploymentName = deploymentNames.length > 0 ? deploymentNames[0] : appName;
+
   // Build link objects based on configured services
-  // In Phase 1.1, these are hardcoded. Phase 1.3 will add k8s querying to populate pod/deployment names.
   const links = [];
 
   if (GRAFANA_BASE_URL) {
@@ -151,14 +207,14 @@ app.get('/api/links', (req, res) => {
       id: 'logs',
       title: 'Logs',
       icon: 'fa-file-lines',
-      url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace)}&var-pod=${encodeURIComponent(appName)}`,
+      url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace)}&var-pod=${encodeURIComponent(primaryPodName)}`,
       category: 'logs'
     });
     links.push({
       id: 'traces',
       title: 'Traces',
       icon: 'fa-timeline',
-      url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace)}&var-service=${encodeURIComponent(appName)}`,
+      url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace)}&var-service=${encodeURIComponent(primaryDeploymentName)}`,
       category: 'traces'
     });
   }
@@ -168,7 +224,7 @@ app.get('/api/links', (req, res) => {
       id: 'vault',
       title: 'Vault Secrets',
       icon: 'fa-key',
-      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace)}/${encodeURIComponent(appName)}/`,
+      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace)}/${encodeURIComponent(primaryDeploymentName)}/`,
       category: 'vault'
     });
   }
@@ -178,7 +234,7 @@ app.get('/api/links', (req, res) => {
       id: 'deployment-config',
       title: 'Deployment Config',
       icon: 'fa-code',
-      url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(appName)}/`,
+      url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(primaryDeploymentName)}/`,
       category: 'deployment-config'
     });
   }
