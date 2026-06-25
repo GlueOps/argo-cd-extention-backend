@@ -1,5 +1,8 @@
 const express = require('express');
+const fs = require('fs/promises');
 const k8s = require('@kubernetes/client-node');
+const path = require('path');
+const yaml = require('js-yaml');
 
 const app = express();
 
@@ -44,6 +47,8 @@ if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(TEMPO_SEARCH_PATH)) {
 const GRAFANA_BASE_URL = (process.env.GRAFANA_BASE_URL || '').replace(/\/$/, '');
 const VAULT_BASE_URL = (process.env.VAULT_BASE_URL || '').replace(/\/$/, '');
 const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || '').replace(/\/$/, '');
+const CONFIG_REPO_LOCAL_ROOT = (process.env.CONFIG_REPO_LOCAL_ROOT || '').trim();
+const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
 const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES || '*').trim();
 
@@ -117,30 +122,6 @@ function buildGitTreeUrl(repoUrl, revision, relativePath) {
   return `${base}/${mode}/${encodedRevision}/${encodedPath}`;
 }
 
-function normalizeAppSlugFromName(appName) {
-  if (typeof appName !== 'string') return '';
-  return appName
-    .trim()
-    .replace(/-(prod|production|nonprod|dev|qa|uat|stage|stg|test)$/i, '');
-}
-
-function inferAppSlugs(appObj, appName) {
-  const slugs = new Set();
-
-  const sources = sourceArrayFromApp(appObj);
-  sources.forEach(source => {
-    if (!source || typeof source !== 'object') return;
-    const valueFiles = source.helm && Array.isArray(source.helm.valueFiles) ? source.helm.valueFiles : [];
-    valueFiles.forEach(valueFile => {
-      if (typeof valueFile !== 'string') return;
-      const match = valueFile.match(/\$[A-Za-z0-9_-]+\/apps\/([^/]+)\//);
-      if (match && match[1]) slugs.add(match[1]);
-    });
-  });
-
-  return Array.from(slugs).filter(Boolean);
-}
-
 function sourceArrayFromApp(appObj) {
   if (!appObj || typeof appObj !== 'object') return [];
   const spec = appObj.spec && typeof appObj.spec === 'object' ? appObj.spec : {};
@@ -166,14 +147,183 @@ function extractAppConfigPath(pathValue) {
   return pathValue;
 }
 
-function buildConfigRepoLinks(appObj) {
-  const sources = sourceArrayFromApp(appObj);
+function parseGitHubRepo(repoUrl) {
+  const normalized = normalizeGitRepoUrl(repoUrl);
+  const match = normalized.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/i);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2] };
+}
+
+function buildGitRawUrl(repoUrl, revision, relativePath) {
+  const repo = parseGitHubRepo(repoUrl);
+  if (!repo) return '';
+  const encodedRevision = encodeURIComponent(revision.trim());
+  const encodedPath = encodePathSegments(relativePath.trim());
+  if (!encodedPath) return '';
+  return `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${encodedRevision}/${encodedPath}`;
+}
+
+function buildGitHubContentsApiUrl(repoUrl, revision, relativePath) {
+  const repo = parseGitHubRepo(repoUrl);
+  if (!repo) return '';
+  const encodedPath = encodePathSegments(relativePath.trim());
+  const params = new URLSearchParams({ ref: revision.trim() });
+  return `https://api.github.com/repos/${repo.owner}/${repo.repo}/contents/${encodedPath}?${params.toString()}`;
+}
+
+function buildVaultSecretUrl(secretPath) {
+  if (!VAULT_BASE_URL || typeof secretPath !== 'string') return '';
+  const trimmedPath = secretPath.trim().replace(/^secret\//, '').replace(/^\/+|\/+$/g, '');
+  if (!trimmedPath) return '';
+  return `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodePathSegments(trimmedPath)}/`;
+}
+
+function labelFromSecretPath(secretPath) {
+  return typeof secretPath === 'string' ? secretPath.trim().replace(/^secret\//, '').replace(/^\/+|\/+$/g, '') : '';
+}
+
+function buildSourceRefs(appObj) {
   const refs = {};
-  sources.forEach(source => {
+  sourceArrayFromApp(appObj).forEach(source => {
     if (source && typeof source === 'object' && typeof source.ref === 'string' && source.ref.trim() !== '') {
       refs[source.ref.trim()] = source;
     }
   });
+  return refs;
+}
+
+function collectAppSpecificValueFiles(appObj) {
+  const refs = buildSourceRefs(appObj);
+  const files = [];
+
+  sourceArrayFromApp(appObj).forEach(source => {
+    if (!source || typeof source !== 'object') return;
+    const valueFiles = source.helm && Array.isArray(source.helm.valueFiles) ? source.helm.valueFiles : [];
+    valueFiles.forEach(valueFile => {
+      const parsed = extractRefPath(valueFile);
+      if (!parsed || !/^apps\/[^/]+\//.test(parsed.path)) return;
+      const refSource = refs[parsed.ref];
+      if (!refSource || typeof refSource !== 'object' || typeof refSource.repoURL !== 'string' || refSource.repoURL.trim() === '') return;
+      const revision = typeof refSource.targetRevision === 'string' && refSource.targetRevision.trim() !== '' ? refSource.targetRevision : 'main';
+      files.push({
+        repoUrl: refSource.repoURL,
+        revision,
+        path: parsed.path
+      });
+    });
+  });
+
+  const uniq = new Map();
+  files.forEach(file => {
+    const key = `${normalizeGitRepoUrl(file.repoUrl)}|${file.revision}|${file.path}`;
+    if (!uniq.has(key)) uniq.set(key, file);
+  });
+  return Array.from(uniq.values());
+}
+
+async function fetchText(url, headers) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: headers || {},
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      return '';
+    }
+
+    return await response.text();
+  } catch (err) {
+    logDebug('fetchText failed', { url, message: err.message });
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readConfigRepoFileText(repoUrl, revision, relativePath) {
+  if (CONFIG_REPO_LOCAL_ROOT && normalizeGitRepoUrl(repoUrl) === normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) {
+    try {
+      return await fs.readFile(path.join(CONFIG_REPO_LOCAL_ROOT, relativePath), 'utf8');
+    } catch (err) {
+      logDebug('local config repo read failed', { relativePath, message: err.message });
+    }
+  }
+
+  if (GITHUB_TOKEN) {
+    const apiUrl = buildGitHubContentsApiUrl(repoUrl, revision, relativePath);
+    if (apiUrl) {
+      const body = await fetchText(apiUrl, {
+        Accept: 'application/vnd.github.raw',
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        'X-GitHub-Api-Version': '2022-11-28'
+      });
+      if (body) return body;
+    }
+  }
+
+  const rawUrl = buildGitRawUrl(repoUrl, revision, relativePath);
+  if (!rawUrl) return '';
+  return fetchText(rawUrl, {});
+}
+
+function extractRemoteRefKeysFromYaml(yamlText) {
+  if (typeof yamlText !== 'string' || yamlText.trim() === '') return [];
+
+  const keys = new Set();
+  try {
+    const docs = [];
+    yaml.loadAll(yamlText, doc => docs.push(doc));
+    docs.forEach(doc => {
+      const secrets = doc && doc.externalSecret && doc.externalSecret.secrets && typeof doc.externalSecret.secrets === 'object'
+        ? doc.externalSecret.secrets
+        : null;
+      if (!secrets) return;
+
+      Object.values(secrets).forEach(secretConfig => {
+        const data = secretConfig && secretConfig.data && typeof secretConfig.data === 'object' ? secretConfig.data : null;
+        if (!data) return;
+
+        Object.values(data).forEach(dataConfig => {
+          const remoteRef = dataConfig && dataConfig.remoteRef && typeof dataConfig.remoteRef === 'object' ? dataConfig.remoteRef : null;
+          const key = remoteRef && typeof remoteRef.key === 'string' ? remoteRef.key.trim() : '';
+          if (key) keys.add(key);
+        });
+      });
+    });
+  } catch (err) {
+    logDebug('extractRemoteRefKeysFromYaml failed', err.message);
+  }
+
+  return Array.from(keys);
+}
+
+async function buildExternalSecretLinksFromConfig(appObj) {
+  const valueFiles = collectAppSpecificValueFiles(appObj);
+  const secretPaths = new Map();
+
+  for (const valueFile of valueFiles) {
+    const body = await readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path);
+    const remoteRefKeys = extractRemoteRefKeysFromYaml(body);
+    remoteRefKeys.forEach(secretPath => {
+      const url = buildVaultSecretUrl(secretPath);
+      const label = labelFromSecretPath(secretPath);
+      if (url && label && !secretPaths.has(url)) {
+        secretPaths.set(url, { url, label });
+      }
+    });
+  }
+
+  return Array.from(secretPaths.values());
+}
+
+function buildConfigRepoLinks(appObj) {
+  const sources = sourceArrayFromApp(appObj);
+  const refs = buildSourceRefs(appObj);
 
   const links = [];
   sources.forEach(source => {
@@ -276,6 +426,57 @@ async function getRelatedSecrets(namespace, appName, trackingId) {
     return Array.from(new Set(names));
   } catch (err) {
     logDebug('getRelatedSecrets failed', err.message);
+    return [];
+  }
+}
+
+async function getRelatedExternalSecretLinks(namespace, appName) {
+  if (!k8sCustomObjectsApi) return [];
+  if (typeof namespace !== 'string' || namespace.trim() === '') return [];
+  if (typeof appName !== 'string' || appName.trim() === '') return [];
+
+  try {
+    const response = await k8sCustomObjectsApi.listNamespacedCustomObject('external-secrets.io', 'v1', namespace, 'externalsecrets');
+    const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
+    const secretLinks = new Map();
+
+    items.forEach(item => {
+      const metadata = item && item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+      const labels = metadata.labels && typeof metadata.labels === 'object' ? metadata.labels : {};
+      const matchesApp =
+        (typeof labels['app.kubernetes.io/instance'] === 'string' && labels['app.kubernetes.io/instance'] === appName) ||
+        (typeof labels['argocd.argoproj.io/instance'] === 'string' && labels['argocd.argoproj.io/instance'] === appName);
+
+      if (!matchesApp) return;
+
+      const spec = item && item.spec && typeof item.spec === 'object' ? item.spec : {};
+      const data = Array.isArray(spec.data) ? spec.data : [];
+      const dataFrom = Array.isArray(spec.dataFrom) ? spec.dataFrom : [];
+
+      data.forEach(entry => {
+        const remoteRef = entry && entry.remoteRef && typeof entry.remoteRef === 'object' ? entry.remoteRef : null;
+        const secretPath = remoteRef && typeof remoteRef.key === 'string' ? remoteRef.key.trim() : '';
+        const url = buildVaultSecretUrl(secretPath);
+        const label = labelFromSecretPath(secretPath);
+        if (url && label && !secretLinks.has(url)) {
+          secretLinks.set(url, { url, label });
+        }
+      });
+
+      dataFrom.forEach(entry => {
+        const extract = entry && entry.extract && typeof entry.extract === 'object' ? entry.extract : null;
+        const secretPath = extract && typeof extract.key === 'string' ? extract.key.trim() : '';
+        const url = buildVaultSecretUrl(secretPath);
+        const label = labelFromSecretPath(secretPath);
+        if (url && label && !secretLinks.has(url)) {
+          secretLinks.set(url, { url, label });
+        }
+      });
+    });
+
+    return Array.from(secretLinks.values());
+  } catch (err) {
+    logDebug('getRelatedExternalSecretLinks failed', err.message);
     return [];
   }
 }
@@ -399,11 +600,12 @@ app.get('/api/links', async (req, res) => {
   const destinationNamespace = appSpec.destination && typeof appSpec.destination === 'object' && typeof appSpec.destination.namespace === 'string'
     ? appSpec.destination.namespace
     : namespace;
-  const appSlugs = inferAppSlugs(appObj, appName);
 
   // Query Kubernetes for pods and deployments (Phase 1.3)
   const { podNames, deploymentNames } = await getAppResources(destinationNamespace, appName);
   const secretNames = await getRelatedSecrets(destinationNamespace, appName, trackingId);
+  const externalSecretLinks = await getRelatedExternalSecretLinks(destinationNamespace, appName);
+  const configExternalSecretLinks = await buildExternalSecretLinksFromConfig(appObj);
   const configRepoLinks = buildConfigRepoLinks(appObj);
   
   // Use first pod name if available, otherwise fall back to appName
@@ -449,17 +651,15 @@ app.get('/api/links', async (req, res) => {
   }
 
   if (VAULT_BASE_URL) {
-    const secretLinks = secretNames.map(secretName => ({
-      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(secretName)}/`,
-      label: secretName
-    }));
+    let secretLinks = externalSecretLinks;
     if (secretLinks.length === 0) {
-      appSlugs.forEach(slug => {
-        secretLinks.push({
-          url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(slug)}/`,
-          label: slug
-        });
-      });
+      secretLinks = secretNames.map(secretName => ({
+        url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(secretName)}/`,
+        label: secretName
+      }));
+    }
+    if (secretLinks.length === 0) {
+      secretLinks = configExternalSecretLinks;
     }
     categories.push({
       id: 'vault-secrets',
