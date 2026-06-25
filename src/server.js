@@ -126,8 +126,6 @@ function normalizeAppSlugFromName(appName) {
 
 function inferAppSlugs(appObj, appName) {
   const slugs = new Set();
-  const normalized = normalizeAppSlugFromName(appName);
-  if (normalized) slugs.add(normalized);
 
   const sources = sourceArrayFromApp(appObj);
   sources.forEach(source => {
@@ -401,6 +399,7 @@ app.get('/api/links', async (req, res) => {
   const destinationNamespace = appSpec.destination && typeof appSpec.destination === 'object' && typeof appSpec.destination.namespace === 'string'
     ? appSpec.destination.namespace
     : namespace;
+  const appSlugs = inferAppSlugs(appObj, appName);
 
   // Query Kubernetes for pods and deployments (Phase 1.3)
   const { podNames, deploymentNames } = await getAppResources(destinationNamespace, appName);
@@ -454,6 +453,14 @@ app.get('/api/links', async (req, res) => {
       url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(secretName)}/`,
       label: secretName
     }));
+    if (secretLinks.length === 0) {
+      appSlugs.forEach(slug => {
+        secretLinks.push({
+          url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(slug)}/`,
+          label: slug
+        });
+      });
+    }
     categories.push({
       id: 'vault-secrets',
       label: `Secrets (${secretLinks.length})`,
