@@ -71,15 +71,162 @@ function logDebug(message, meta) {
 // Initialize Kubernetes client (in-cluster config)
 let k8sApi = null;
 let k8sAppsApi = null;
+let k8sCustomObjectsApi = null;
 try {
   const kc = new k8s.KubeConfig();
   kc.loadFromCluster();
   k8sApi = kc.makeApiClient(k8s.CoreV1Api);
   k8sAppsApi = kc.makeApiClient(k8s.AppsV1Api);
+  k8sCustomObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi);
   logDebug('Kubernetes client initialized');
 } catch (err) {
   logDebug('Kubernetes client initialization failed (running outside cluster?)', err.message);
   // This is OK - we'll gracefully degrade if k8s client isn't available
+}
+
+function normalizeGitRepoUrl(repoUrl) {
+  if (typeof repoUrl !== 'string') return '';
+  return repoUrl.replace(/\.git$/, '').replace(/\/$/, '');
+}
+
+function encodePathSegments(pathValue) {
+  if (typeof pathValue !== 'string') return '';
+  return pathValue
+    .split('/')
+    .filter(Boolean)
+    .map(part => encodeURIComponent(part))
+    .join('/');
+}
+
+function buildGitTreeUrl(repoUrl, revision, relativePath) {
+  if (typeof repoUrl !== 'string' || repoUrl.trim() === '') return '';
+  if (typeof revision !== 'string' || revision.trim() === '') return '';
+  if (typeof relativePath !== 'string' || relativePath.trim() === '') return '';
+  const base = normalizeGitRepoUrl(repoUrl);
+  const encodedRevision = encodeURIComponent(revision.trim());
+  const encodedPath = encodePathSegments(relativePath.trim());
+  if (!base || !encodedPath) return '';
+  return `${base}/tree/${encodedRevision}/${encodedPath}`;
+}
+
+function sourceArrayFromApp(appObj) {
+  if (!appObj || typeof appObj !== 'object') return [];
+  const spec = appObj.spec && typeof appObj.spec === 'object' ? appObj.spec : {};
+  if (Array.isArray(spec.sources) && spec.sources.length > 0) return spec.sources;
+  if (spec.source && typeof spec.source === 'object') return [spec.source];
+  return [];
+}
+
+function extractRefPath(valueFile) {
+  if (typeof valueFile !== 'string') return null;
+  const match = valueFile.match(/^\$([A-Za-z0-9_-]+)\/(.+)$/);
+  if (!match) return null;
+  return { ref: match[1], path: match[2] };
+}
+
+function extractAppConfigPath(pathValue) {
+  if (typeof pathValue !== 'string' || pathValue.trim() === '') return '';
+  const parts = pathValue.split('/').filter(Boolean);
+  const appsIdx = parts.indexOf('apps');
+  if (appsIdx >= 0 && appsIdx + 1 < parts.length) {
+    return `apps/${parts[appsIdx + 1]}`;
+  }
+  return pathValue;
+}
+
+function buildConfigRepoLinks(appObj) {
+  const sources = sourceArrayFromApp(appObj);
+  const refs = {};
+  sources.forEach(source => {
+    if (source && typeof source === 'object' && typeof source.ref === 'string' && source.ref.trim() !== '') {
+      refs[source.ref.trim()] = source;
+    }
+  });
+
+  const links = [];
+  sources.forEach(source => {
+    if (!source || typeof source !== 'object') return;
+    const valueFiles = source.helm && Array.isArray(source.helm.valueFiles) ? source.helm.valueFiles : [];
+    valueFiles.forEach(valueFile => {
+      const parsed = extractRefPath(valueFile);
+      if (!parsed) return;
+      const refSource = refs[parsed.ref];
+      if (!refSource || typeof refSource !== 'object') return;
+      const repoUrl = typeof refSource.repoURL === 'string' ? refSource.repoURL : '';
+      const revision = typeof refSource.targetRevision === 'string' && refSource.targetRevision.trim() !== '' ? refSource.targetRevision : 'main';
+      const configPath = extractAppConfigPath(parsed.path);
+      const url = buildGitTreeUrl(repoUrl, revision, configPath);
+      if (!url) return;
+      links.push({
+        label: `Config (${configPath})`,
+        url
+      });
+    });
+  });
+
+  if (links.length > 0) {
+    const uniq = new Map();
+    links.forEach(link => {
+      if (!uniq.has(link.url)) uniq.set(link.url, link);
+    });
+    return Array.from(uniq.values());
+  }
+
+  const direct = sources.find(source => source && typeof source === 'object' && typeof source.repoURL === 'string' && typeof source.path === 'string' && source.path.trim() !== '' && source.path.trim() !== '.');
+  if (!direct) return [];
+  const revision = typeof direct.targetRevision === 'string' && direct.targetRevision.trim() !== '' ? direct.targetRevision : 'main';
+  const url = buildGitTreeUrl(direct.repoURL, revision, direct.path);
+  if (!url) return [];
+  return [{ label: `Config (${direct.path})`, url }];
+}
+
+async function getArgoApplication(namespace, appName) {
+  if (!k8sCustomObjectsApi) return null;
+  if (typeof namespace !== 'string' || namespace.trim() === '') return null;
+  if (typeof appName !== 'string' || appName.trim() === '') return null;
+  try {
+    const response = await k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', namespace, 'applications', appName);
+    return response && response.body && typeof response.body === 'object' ? response.body : null;
+  } catch (err) {
+    logDebug('getArgoApplication failed', err.message);
+    return null;
+  }
+}
+
+async function getRelatedSecrets(namespace, appName, trackingId) {
+  if (!k8sApi) return [];
+  if (typeof namespace !== 'string' || namespace.trim() === '') return [];
+  if (typeof appName !== 'string' || appName.trim() === '') return [];
+
+  try {
+    const response = await k8sApi.listNamespacedSecret(namespace);
+    const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
+    const normalizedApp = appName.toLowerCase();
+    const normalizedTracking = typeof trackingId === 'string' ? trackingId.toLowerCase() : '';
+
+    const names = items
+      .filter(secret => {
+        const md = secret && secret.metadata && typeof secret.metadata === 'object' ? secret.metadata : {};
+        const labels = md.labels && typeof md.labels === 'object' ? md.labels : {};
+        const annotations = md.annotations && typeof md.annotations === 'object' ? md.annotations : {};
+        const name = typeof md.name === 'string' ? md.name : '';
+        const tracking = typeof annotations['argocd.argoproj.io/tracking-id'] === 'string' ? annotations['argocd.argoproj.io/tracking-id'] : '';
+        return (
+          (typeof labels['argocd.argoproj.io/instance'] === 'string' && labels['argocd.argoproj.io/instance'] === appName) ||
+          (typeof labels['app.kubernetes.io/instance'] === 'string' && labels['app.kubernetes.io/instance'] === appName) ||
+          (tracking && normalizedTracking && tracking.toLowerCase().includes(normalizedTracking)) ||
+          (name && name.toLowerCase().includes(normalizedApp))
+        );
+      })
+      .map(secret => secret.metadata && typeof secret.metadata.name === 'string' ? secret.metadata.name : '')
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    return Array.from(new Set(names));
+  } catch (err) {
+    logDebug('getRelatedSecrets failed', err.message);
+    return [];
+  }
 }
 
 // Helper to query pods/deployments for a given app
@@ -192,8 +339,20 @@ app.get('/api/links', async (req, res) => {
 
   logDebug('links request', { namespace, appName, projectName });
 
+  const appObj = await getArgoApplication(namespace, appName);
+  const appMetadata = appObj && appObj.metadata && typeof appObj.metadata === 'object' ? appObj.metadata : {};
+  const appSpec = appObj && appObj.spec && typeof appObj.spec === 'object' ? appObj.spec : {};
+  const trackingId = appMetadata.annotations && typeof appMetadata.annotations === 'object'
+    ? appMetadata.annotations['argocd.argoproj.io/tracking-id'] || ''
+    : '';
+  const destinationNamespace = appSpec.destination && typeof appSpec.destination === 'object' && typeof appSpec.destination.namespace === 'string'
+    ? appSpec.destination.namespace
+    : namespace;
+
   // Query Kubernetes for pods and deployments (Phase 1.3)
-  const { podNames, deploymentNames } = await getAppResources(namespace, appName);
+  const { podNames, deploymentNames } = await getAppResources(destinationNamespace, appName);
+  const secretNames = await getRelatedSecrets(destinationNamespace, appName, trackingId);
+  const configRepoLinks = buildConfigRepoLinks(appObj);
   
   // Use first pod name if available, otherwise fall back to appName
   const primaryPodName = podNames.length > 0 ? podNames[0] : appName;
@@ -202,51 +361,53 @@ app.get('/api/links', async (req, res) => {
   // Build categories response matching UI extension expectations
   const categories = [];
 
-  if (GRAFANA_BASE_URL) {
+  if (GRAFANA_BASE_URL && primaryPodName) {
     categories.push({
       id: 'logs',
       label: 'Logs',
       icon: '📋',
       status: 'ok',
       links: [{
-        url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace)}&var-pod=${encodeURIComponent(primaryPodName)}`,
+        url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(destinationNamespace)}&var-pod=${encodeURIComponent(primaryPodName)}`,
         label: 'View Logs'
-      }]
-    });
-    categories.push({
-      id: 'traces',
-      label: 'Traces',
-      icon: '⏱️',
-      status: 'ok',
-      links: [{
-        url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace)}&var-service=${encodeURIComponent(primaryDeploymentName)}`,
-        label: 'View Traces'
       }]
     });
   }
 
   if (VAULT_BASE_URL) {
+    const secretLinks = secretNames.map(secretName => ({
+      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(destinationNamespace)}/${encodeURIComponent(secretName)}`,
+      label: secretName
+    }));
     categories.push({
-      id: 'vault',
-      label: 'Vault Secrets',
+      id: 'vault-secrets',
+      label: `Secrets (${secretNames.length})`,
       icon: '🔐',
       status: 'ok',
-      links: [{
-        url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace)}/${encodeURIComponent(primaryDeploymentName)}/`,
-        label: 'View Secrets'
+      links: secretLinks.length > 0 ? secretLinks : [{
+        url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(destinationNamespace)}`,
+        label: 'Open Namespace Secrets'
       }]
     });
   }
 
-  if (DEPLOYMENT_CONFIG_REPO_URL) {
+  if (configRepoLinks.length > 0) {
+    categories.push({
+      id: 'deployment-config',
+      label: 'Config Repo',
+      icon: '⚙️',
+      status: 'ok',
+      links: configRepoLinks
+    });
+  } else if (DEPLOYMENT_CONFIG_REPO_URL) {
     categories.push({
       id: 'deployment-config',
       label: 'Config Repo',
       icon: '⚙️',
       status: 'ok',
       links: [{
-        url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(primaryDeploymentName)}/`,
-        label: 'View Config'
+        url: DEPLOYMENT_CONFIG_REPO_URL,
+        label: 'Open Repository'
       }]
     });
   }

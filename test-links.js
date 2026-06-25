@@ -13,48 +13,45 @@ const ALLOWED_NAMESPACES = '*';
 console.log('Test 1: Valid headers, all services configured');
 const namespace1 = 'nonprod';
 const appName1 = 'back-end-antonios-tacos-prod';
-const links1 = [];
+const categories1 = [];
 
 if (GRAFANA_BASE_URL) {
-  links1.push({
+  categories1.push({
     id: 'logs',
-    title: 'Logs',
-    icon: 'fa-file-lines',
-    url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace1)}&var-pod=${encodeURIComponent(appName1)}`,
-    category: 'logs'
-  });
-  links1.push({
-    id: 'traces',
-    title: 'Traces',
-    icon: 'fa-timeline',
-    url: `${GRAFANA_BASE_URL}/d/traces?var-namespace=${encodeURIComponent(namespace1)}&var-service=${encodeURIComponent(appName1)}`,
-    category: 'traces'
+    label: 'Logs',
+    links: [{
+      url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(namespace1)}&var-pod=${encodeURIComponent(appName1)}`,
+      label: 'View Logs'
+    }]
   });
 }
 
 if (VAULT_BASE_URL) {
-  links1.push({
-    id: 'vault',
-    title: 'Vault Secrets',
-    icon: 'fa-key',
-    url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace1)}/${encodeURIComponent(appName1)}/`,
-    category: 'vault'
+  categories1.push({
+    id: 'vault-secrets',
+    label: 'Secrets (0)',
+    links: [{
+      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace1)}`,
+      label: 'Open Namespace Secrets'
+    }]
   });
 }
 
 if (DEPLOYMENT_CONFIG_REPO_URL) {
-  links1.push({
+  categories1.push({
     id: 'deployment-config',
-    title: 'Deployment Config',
-    icon: 'fa-code',
-    url: `${DEPLOYMENT_CONFIG_REPO_URL}/blob/main/deployment-configurations/apps/${encodeURIComponent(appName1)}/`,
-    category: 'deployment-config'
+    label: 'Config Repo',
+    links: [{
+      url: DEPLOYMENT_CONFIG_REPO_URL,
+      label: 'Open Repository'
+    }]
   });
 }
 
-console.log('✓ Generated links:', JSON.stringify(links1, null, 2));
-console.log(`✓ Expected 4 links (logs, traces, vault, deployment-config), got ${links1.length}`);
-if (links1.length === 4) console.log('✓ PASS\n');
+console.log('✓ Generated categories:', JSON.stringify(categories1, null, 2));
+console.log(`✓ Expected 3 categories (logs, vault-secrets, deployment-config), got ${categories1.length}`);
+const hasTraces = categories1.some(c => c.id === 'traces');
+if (categories1.length === 3 && !hasTraces) console.log('✓ PASS\n');
 else console.log('✗ FAIL\n');
 
 // Test 2: Namespace filtering
@@ -74,23 +71,23 @@ console.log('Test 3: Services disabled (empty URLs)');
 const GRAFANA_BASE_URL_3 = '';
 const VAULT_BASE_URL_3 = 'https://vault.example.com';
 const DEPLOYMENT_CONFIG_REPO_URL_3 = '';
-const links3 = [];
+const categories3 = [];
 
 if (GRAFANA_BASE_URL_3) {
-  links3.push({ id: 'logs', title: 'Logs', category: 'logs' });
+  categories3.push({ id: 'logs', label: 'Logs' });
 }
 
 if (VAULT_BASE_URL_3) {
-  links3.push({ id: 'vault', title: 'Vault Secrets', category: 'vault' });
+  categories3.push({ id: 'vault-secrets', label: 'Secrets (0)' });
 }
 
 if (DEPLOYMENT_CONFIG_REPO_URL_3) {
-  links3.push({ id: 'deployment-config', title: 'Deployment Config', category: 'deployment-config' });
+  categories3.push({ id: 'deployment-config', label: 'Config Repo' });
 }
 
-console.log(`✓ Generated links: ${links3.length} (only vault, since Grafana and repo URLs are empty)`);
-console.log(`✓ Expected 1 link, got ${links3.length}`);
-if (links3.length === 1) console.log('✓ PASS\n');
+console.log(`✓ Generated categories: ${categories3.length} (only secrets, since Grafana and repo URLs are empty)`);
+console.log(`✓ Expected 1 category, got ${categories3.length}`);
+if (categories3.length === 1 && categories3[0].id === 'vault-secrets') console.log('✓ PASS\n');
 else console.log('✗ FAIL\n');
 
 // Test 4: URL encoding
