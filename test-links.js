@@ -24,16 +24,31 @@ if (GRAFANA_BASE_URL) {
       label: 'View Logs'
     }]
   });
+
+  categories1.push({
+    id: 'traces',
+    label: 'Traces',
+    links: [{
+      url: `${GRAFANA_BASE_URL}/explore?orgId=1&var-namespace=${encodeURIComponent(namespace1)}&var-service=${encodeURIComponent(appName1)}`,
+      label: 'Explore Traces'
+    }]
+  });
+
+  categories1.push({
+    id: 'metrics',
+    label: 'Metrics',
+    links: [{
+      url: `${GRAFANA_BASE_URL}/explore?orgId=1&var-namespace=${encodeURIComponent(namespace1)}&var-workload=${encodeURIComponent(appName1)}`,
+      label: 'Explore Metrics'
+    }]
+  });
 }
 
 if (VAULT_BASE_URL) {
   categories1.push({
     id: 'vault-secrets',
     label: 'Secrets (0)',
-    links: [{
-      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(namespace1)}`,
-      label: 'Open Namespace Secrets'
-    }]
+    links: []
   });
 }
 
@@ -49,9 +64,10 @@ if (DEPLOYMENT_CONFIG_REPO_URL) {
 }
 
 console.log('✓ Generated categories:', JSON.stringify(categories1, null, 2));
-console.log(`✓ Expected 3 categories (logs, vault-secrets, deployment-config), got ${categories1.length}`);
+console.log(`✓ Expected 5 categories (logs, traces, metrics, vault-secrets, deployment-config), got ${categories1.length}`);
 const hasTraces = categories1.some(c => c.id === 'traces');
-if (categories1.length === 3 && !hasTraces) console.log('✓ PASS\n');
+const hasMetrics = categories1.some(c => c.id === 'metrics');
+if (categories1.length === 5 && hasTraces && hasMetrics) console.log('✓ PASS\n');
 else console.log('✗ FAIL\n');
 
 // Test 2: Namespace filtering
@@ -85,9 +101,9 @@ if (DEPLOYMENT_CONFIG_REPO_URL_3) {
   categories3.push({ id: 'deployment-config', label: 'Config Repo' });
 }
 
-console.log(`✓ Generated categories: ${categories3.length} (only secrets, since Grafana and repo URLs are empty)`);
+console.log(`✓ Generated categories: ${categories3.length} (only secrets when Grafana and repo URLs are empty)`);
 console.log(`✓ Expected 1 category, got ${categories3.length}`);
-if (categories3.length === 1 && categories3[0].id === 'vault-secrets') console.log('✓ PASS\n');
+if (categories3.length === 1 && categories3.some(c => c.id === 'vault-secrets')) console.log('✓ PASS\n');
 else console.log('✗ FAIL\n');
 
 // Test 4: URL encoding

@@ -44,6 +44,7 @@ if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(TEMPO_SEARCH_PATH)) {
 const GRAFANA_BASE_URL = (process.env.GRAFANA_BASE_URL || '').replace(/\/$/, '');
 const VAULT_BASE_URL = (process.env.VAULT_BASE_URL || '').replace(/\/$/, '');
 const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || '').replace(/\/$/, '');
+const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
 const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES || '*').trim();
 
 // Validate URLs are well-formed if provided
@@ -89,6 +90,10 @@ function normalizeGitRepoUrl(repoUrl) {
   return repoUrl.replace(/\.git$/, '').replace(/\/$/, '');
 }
 
+function asNonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : '';
+}
+
 function encodePathSegments(pathValue) {
   if (typeof pathValue !== 'string') return '';
   return pathValue
@@ -106,7 +111,36 @@ function buildGitTreeUrl(repoUrl, revision, relativePath) {
   const encodedRevision = encodeURIComponent(revision.trim());
   const encodedPath = encodePathSegments(relativePath.trim());
   if (!base || !encodedPath) return '';
-  return `${base}/tree/${encodedRevision}/${encodedPath}`;
+  const lastSegment = relativePath.trim().split('/').filter(Boolean).pop() || '';
+  const isLikelyFile = /\.[A-Za-z0-9]+$/.test(lastSegment);
+  const mode = isLikelyFile ? 'blob' : 'tree';
+  return `${base}/${mode}/${encodedRevision}/${encodedPath}`;
+}
+
+function normalizeAppSlugFromName(appName) {
+  if (typeof appName !== 'string') return '';
+  return appName
+    .trim()
+    .replace(/-(prod|production|nonprod|dev|qa|uat|stage|stg|test)$/i, '');
+}
+
+function inferAppSlugs(appObj, appName) {
+  const slugs = new Set();
+  const normalized = normalizeAppSlugFromName(appName);
+  if (normalized) slugs.add(normalized);
+
+  const sources = sourceArrayFromApp(appObj);
+  sources.forEach(source => {
+    if (!source || typeof source !== 'object') return;
+    const valueFiles = source.helm && Array.isArray(source.helm.valueFiles) ? source.helm.valueFiles : [];
+    valueFiles.forEach(valueFile => {
+      if (typeof valueFile !== 'string') return;
+      const match = valueFile.match(/\$[A-Za-z0-9_-]+\/apps\/([^/]+)\//);
+      if (match && match[1]) slugs.add(match[1]);
+    });
+  });
+
+  return Array.from(slugs).filter(Boolean);
 }
 
 function sourceArrayFromApp(appObj) {
@@ -182,13 +216,34 @@ function buildConfigRepoLinks(appObj) {
 
 async function getArgoApplication(namespace, appName) {
   if (!k8sCustomObjectsApi) return null;
-  if (typeof namespace !== 'string' || namespace.trim() === '') return null;
-  if (typeof appName !== 'string' || appName.trim() === '') return null;
+  const normalizedNamespace = asNonEmptyString(namespace);
+  const normalizedAppName = asNonEmptyString(appName);
+  if (!normalizedNamespace || !normalizedAppName) return null;
+
+  const candidateNamespaces = [];
+  candidateNamespaces.push(normalizedNamespace);
+  ARGOCD_APP_NAMESPACES.forEach(ns => {
+    if (ns && !candidateNamespaces.includes(ns)) candidateNamespaces.push(ns);
+  });
+
+  for (const ns of candidateNamespaces) {
+    try {
+      const response = await k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', ns, 'applications', normalizedAppName);
+      if (response && response.body && typeof response.body === 'object') {
+        return response.body;
+      }
+    } catch (err) {
+      logDebug('getArgoApplication namespaced lookup failed', { namespace: ns, message: err.message });
+    }
+  }
+
   try {
-    const response = await k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', namespace, 'applications', appName);
-    return response && response.body && typeof response.body === 'object' ? response.body : null;
+    const response = await k8sCustomObjectsApi.listClusterCustomObject('argoproj.io', 'v1alpha1', 'applications');
+    const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
+    const match = items.find(item => item && item.metadata && item.metadata.name === normalizedAppName);
+    return match || null;
   } catch (err) {
-    logDebug('getArgoApplication failed', err.message);
+    logDebug('getArgoApplication cluster lookup failed', err.message);
     return null;
   }
 }
@@ -201,7 +256,6 @@ async function getRelatedSecrets(namespace, appName, trackingId) {
   try {
     const response = await k8sApi.listNamespacedSecret(namespace);
     const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
-    const normalizedApp = appName.toLowerCase();
     const normalizedTracking = typeof trackingId === 'string' ? trackingId.toLowerCase() : '';
 
     const names = items
@@ -214,8 +268,7 @@ async function getRelatedSecrets(namespace, appName, trackingId) {
         return (
           (typeof labels['argocd.argoproj.io/instance'] === 'string' && labels['argocd.argoproj.io/instance'] === appName) ||
           (typeof labels['app.kubernetes.io/instance'] === 'string' && labels['app.kubernetes.io/instance'] === appName) ||
-          (tracking && normalizedTracking && tracking.toLowerCase().includes(normalizedTracking)) ||
-          (name && name.toLowerCase().includes(normalizedApp))
+          (tracking && normalizedTracking && tracking.toLowerCase().includes(normalizedTracking))
         );
       })
       .map(secret => secret.metadata && typeof secret.metadata.name === 'string' ? secret.metadata.name : '')
@@ -372,22 +425,41 @@ app.get('/api/links', async (req, res) => {
         label: 'View Logs'
       }]
     });
+
+    categories.push({
+      id: 'traces',
+      label: 'Traces',
+      icon: '⏱️',
+      status: 'ok',
+      links: [{
+        url: `${GRAFANA_BASE_URL}/explore?orgId=1&var-namespace=${encodeURIComponent(destinationNamespace)}&var-service=${encodeURIComponent(primaryDeploymentName)}`,
+        label: 'Explore Traces'
+      }]
+    });
+
+    categories.push({
+      id: 'metrics',
+      label: 'Metrics',
+      icon: '📈',
+      status: 'ok',
+      links: [{
+        url: `${GRAFANA_BASE_URL}/explore?orgId=1&var-namespace=${encodeURIComponent(destinationNamespace)}&var-workload=${encodeURIComponent(primaryDeploymentName)}`,
+        label: 'Explore Metrics'
+      }]
+    });
   }
 
   if (VAULT_BASE_URL) {
     const secretLinks = secretNames.map(secretName => ({
-      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(destinationNamespace)}/${encodeURIComponent(secretName)}`,
+      url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(secretName)}/`,
       label: secretName
     }));
     categories.push({
       id: 'vault-secrets',
-      label: `Secrets (${secretNames.length})`,
+      label: `Secrets (${secretLinks.length})`,
       icon: '🔐',
       status: 'ok',
-      links: secretLinks.length > 0 ? secretLinks : [{
-        url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(destinationNamespace)}`,
-        label: 'Open Namespace Secrets'
-      }]
+      links: secretLinks
     });
   }
 
@@ -398,17 +470,6 @@ app.get('/api/links', async (req, res) => {
       icon: '⚙️',
       status: 'ok',
       links: configRepoLinks
-    });
-  } else if (DEPLOYMENT_CONFIG_REPO_URL) {
-    categories.push({
-      id: 'deployment-config',
-      label: 'Config Repo',
-      icon: '⚙️',
-      status: 'ok',
-      links: [{
-        url: DEPLOYMENT_CONFIG_REPO_URL,
-        label: 'Open Repository'
-      }]
     });
   }
 
