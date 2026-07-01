@@ -52,6 +52,14 @@ const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
 const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES || '*').trim();
 
+// Grafana dashboard paths ("<uid>" or "<uid>/<slug>"). Defaults match the GlueOps
+// platform dashboards; override per-cluster instead of hardcoding inline.
+const GRAFANA_LOGS_DASHBOARD = (process.env.GRAFANA_LOGS_DASHBOARD || 'tBmi6B0Vz/loki-workload-logs').trim().replace(/^\/+|\/+$/g, '');
+const GRAFANA_METRICS_DASHBOARD = (process.env.GRAFANA_METRICS_DASHBOARD || 'a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload').trim().replace(/^\/+|\/+$/g, '');
+// Traces dashboard ("<uid>" or "<uid>/<slug>"). Unset by default — set this to the Tempo
+// traces dashboard UID to get a real dashboard link; otherwise traces falls back to Explore.
+const GRAFANA_TRACES_DASHBOARD = (process.env.GRAFANA_TRACES_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
+
 // Validate URLs are well-formed if provided
 if (GRAFANA_BASE_URL && !/^https?:\/\//.test(GRAFANA_BASE_URL)) {
   console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(GRAFANA_BASE_URL)}`);
@@ -175,7 +183,67 @@ function buildVaultSecretUrl(secretPath) {
   if (!VAULT_BASE_URL || typeof secretPath !== 'string') return '';
   const trimmedPath = secretPath.trim().replace(/^secret\//, '').replace(/^\/+|\/+$/g, '');
   if (!trimmedPath) return '';
-  return `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodePathSegments(trimmedPath)}/`;
+  // Navigate straight to the secret (and its keys) via the KV "show" view, at any nesting
+  // depth — not the parent folder list. The path comes from ExternalSecret remoteRef.key.
+  return `${VAULT_BASE_URL}/ui/vault/secrets/secret/show/${encodePathSegments(trimmedPath)}`;
+}
+
+// Build a Grafana dashboard URL from a configured "<uid>" or "<uid>/<slug>" path and a set
+// of template vars. Returns '' when Grafana or the dashboard path is unset.
+function buildGrafanaDashboardUrl(dashboardPath, vars) {
+  if (!GRAFANA_BASE_URL || !dashboardPath) return '';
+  const params = new URLSearchParams();
+  Object.entries(vars || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null) return;
+    params.append(key, String(value));
+  });
+  const query = params.toString();
+  return `${GRAFANA_BASE_URL}/d/${dashboardPath}${query ? `?${query}` : ''}`;
+}
+
+// Loki "workload logs" dashboard, keyed by workload name (matches the platform dashboard).
+function buildGrafanaLogsUrl(workloadName) {
+  if (!workloadName) return '';
+  return buildGrafanaDashboardUrl(GRAFANA_LOGS_DASHBOARD, {
+    orgId: '1',
+    'var-workload': workloadName,
+    'var-search': ''
+  });
+}
+
+// kube-prometheus-stack "compute resources / workload" dashboard, keyed by namespace,
+// workload type (deployment/statefulset/daemonset) and workload name.
+function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
+  if (!workloadName) return '';
+  return buildGrafanaDashboardUrl(GRAFANA_METRICS_DASHBOARD, {
+    'var-datasource': 'default',
+    'var-cluster': '',
+    'var-namespace': namespace || '',
+    'var-type': workloadType || 'deployment',
+    'var-workload': workloadName,
+    orgId: '1',
+    refresh: '10s'
+  });
+}
+
+// Traces link for a workload. Uses the configured traces dashboard when set; otherwise
+// falls back to the previous Grafana Explore URL so the category is never missing.
+function buildGrafanaTracesUrl(namespace, workloadName) {
+  if (!GRAFANA_BASE_URL || !workloadName) return '';
+  if (GRAFANA_TRACES_DASHBOARD) {
+    return buildGrafanaDashboardUrl(GRAFANA_TRACES_DASHBOARD, {
+      orgId: '1',
+      'var-namespace': namespace || '',
+      'var-service': workloadName,
+      'var-workload': workloadName
+    });
+  }
+  const params = new URLSearchParams({
+    orgId: '1',
+    'var-namespace': namespace || '',
+    'var-service': workloadName
+  });
+  return `${GRAFANA_BASE_URL}/explore?${params.toString()}`;
 }
 
 function labelFromSecretPath(secretPath) {
@@ -481,38 +549,68 @@ async function getRelatedExternalSecretLinks(namespace, appName) {
   }
 }
 
-// Helper to query pods/deployments for a given app
+// Decide whether a workload's metadata belongs to the given ArgoCD app. Prefer the
+// instance labels ArgoCD/Helm stamp on managed resources; fall back to exact name match.
+// Name-prefix matching is deliberately avoided here to prevent cross-app collisions
+// (e.g. "api" matching "api-worker").
+function metadataMatchesApp(metadata, appName) {
+  const md = metadata && typeof metadata === 'object' ? metadata : {};
+  const labels = md.labels && typeof md.labels === 'object' ? md.labels : {};
+  return (
+    labels['argocd.argoproj.io/instance'] === appName ||
+    labels['app.kubernetes.io/instance'] === appName ||
+    labels['app.kubernetes.io/name'] === appName ||
+    labels['app'] === appName ||
+    md.name === appName
+  );
+}
+
+// Query the workloads (Deployments, StatefulSets, DaemonSets) and pods that make up an app.
+// Each workload carries its kube "type" so callers can build type-aware dashboard links.
 async function getAppResources(namespace, appName) {
-  if (!k8sApi || !k8sAppsApi) return { podNames: [], deploymentNames: [] };
-  
+  const empty = { podNames: [], deploymentNames: [], workloads: [] };
+  if (!k8sApi || !k8sAppsApi) return empty;
+
+  const workloads = [];
+  const collect = async (listFn, type) => {
+    try {
+      const resp = await listFn(namespace);
+      (resp.body.items || [])
+        .filter(item => metadataMatchesApp(item.metadata, appName))
+        .forEach(item => {
+          if (item.metadata && typeof item.metadata.name === 'string') {
+            workloads.push({ name: item.metadata.name, type });
+          }
+        });
+    } catch (err) {
+      logDebug(`getAppResources ${type} lookup failed`, err.message);
+    }
+  };
+
   try {
-    // List pods matching the app name label or name pattern
-    const podsResp = await k8sApi.listNamespacedPod(namespace);
-    const podNames = (podsResp.body.items || [])
-      .filter(pod => 
-        // Match pod name starting with app name or pod has app label matching
-        pod.metadata.name.startsWith(appName.substring(0, Math.min(20, appName.length))) ||
-        pod.metadata.labels?.app === appName ||
-        pod.metadata.labels?.['app.kubernetes.io/name'] === appName
-      )
-      .map(pod => pod.metadata.name);
-    
-    // List deployments matching the app name
-    const deploysResp = await k8sAppsApi.listNamespacedDeployment(namespace);
-    const deploymentNames = (deploysResp.body.items || [])
-      .filter(deploy =>
-        deploy.metadata.name === appName ||
-        deploy.metadata.name.startsWith(appName) ||
-        deploy.metadata.labels?.app === appName ||
-        deploy.metadata.labels?.['app.kubernetes.io/name'] === appName
-      )
-      .map(deploy => deploy.metadata.name);
-    
-    logDebug('app resources queried', { namespace, appName, podNames, deploymentNames });
-    return { podNames, deploymentNames };
+    await Promise.all([
+      collect(ns => k8sAppsApi.listNamespacedDeployment(ns), 'deployment'),
+      collect(ns => k8sAppsApi.listNamespacedStatefulSet(ns), 'statefulset'),
+      collect(ns => k8sAppsApi.listNamespacedDaemonSet(ns), 'daemonset')
+    ]);
+
+    let podNames = [];
+    try {
+      const podsResp = await k8sApi.listNamespacedPod(namespace);
+      podNames = (podsResp.body.items || [])
+        .filter(pod => metadataMatchesApp(pod.metadata, appName))
+        .map(pod => pod.metadata.name)
+        .filter(Boolean);
+    } catch (err) {
+      logDebug('getAppResources pod lookup failed', err.message);
+    }
+
+    const deploymentNames = workloads.filter(w => w.type === 'deployment').map(w => w.name);
+    logDebug('app resources queried', { namespace, appName, workloads, podNames });
+    return { podNames, deploymentNames, workloads };
   } catch (err) {
     logDebug('getAppResources failed', err.message);
-    return { podNames: [], deploymentNames: [] };
+    return empty;
   }
 }
 
@@ -601,53 +699,43 @@ app.get('/api/links', async (req, res) => {
     ? appSpec.destination.namespace
     : namespace;
 
-  // Query Kubernetes for pods and deployments (Phase 1.3)
-  const { podNames, deploymentNames } = await getAppResources(destinationNamespace, appName);
+  // Query Kubernetes for the app's workloads (deployments/statefulsets/daemonsets) and pods.
+  const { workloads } = await getAppResources(destinationNamespace, appName);
   const secretNames = await getRelatedSecrets(destinationNamespace, appName, trackingId);
   const externalSecretLinks = await getRelatedExternalSecretLinks(destinationNamespace, appName);
   const configExternalSecretLinks = await buildExternalSecretLinksFromConfig(appObj);
   const configRepoLinks = buildConfigRepoLinks(appObj);
-  
-  // Use first pod name if available, otherwise fall back to appName
-  const primaryPodName = podNames.length > 0 ? podNames[0] : appName;
-  const primaryDeploymentName = deploymentNames.length > 0 ? deploymentNames[0] : appName;
+
+  // Fall back to the app name as a single deployment-typed workload when discovery turns up
+  // nothing (k8s API unavailable, RBAC, or labels missing).
+  const effectiveWorkloads = workloads.length > 0
+    ? workloads
+    : [{ name: appName, type: 'deployment' }];
 
   // Build categories response matching UI extension expectations
   const categories = [];
 
-  if (GRAFANA_BASE_URL && primaryPodName) {
-    categories.push({
-      id: 'logs',
-      label: 'Logs',
-      icon: '📋',
-      status: 'ok',
-      links: [{
-        url: `${GRAFANA_BASE_URL}/d/logs?var-namespace=${encodeURIComponent(destinationNamespace)}&var-pod=${encodeURIComponent(primaryPodName)}`,
-        label: 'View Logs'
-      }]
-    });
+  if (GRAFANA_BASE_URL) {
+    const logsLinks = effectiveWorkloads
+      .map(w => ({ url: buildGrafanaLogsUrl(w.name), label: w.name }))
+      .filter(link => link.url);
+    if (logsLinks.length > 0) {
+      categories.push({ id: 'logs', label: 'Logs', icon: '📋', status: 'ok', links: logsLinks });
+    }
 
-    categories.push({
-      id: 'traces',
-      label: 'Traces',
-      icon: '⏱️',
-      status: 'ok',
-      links: [{
-        url: `${GRAFANA_BASE_URL}/explore?orgId=1&var-namespace=${encodeURIComponent(destinationNamespace)}&var-service=${encodeURIComponent(primaryDeploymentName)}`,
-        label: 'Explore Traces'
-      }]
-    });
+    const tracesLinks = effectiveWorkloads
+      .map(w => ({ url: buildGrafanaTracesUrl(destinationNamespace, w.name), label: w.name }))
+      .filter(link => link.url);
+    if (tracesLinks.length > 0) {
+      categories.push({ id: 'traces', label: 'Traces', icon: '⏱️', status: 'ok', links: tracesLinks });
+    }
 
-    categories.push({
-      id: 'metrics',
-      label: 'Metrics',
-      icon: '📈',
-      status: 'ok',
-      links: [{
-        url: `${GRAFANA_BASE_URL}/explore?orgId=1&var-namespace=${encodeURIComponent(destinationNamespace)}&var-workload=${encodeURIComponent(primaryDeploymentName)}`,
-        label: 'Explore Metrics'
-      }]
-    });
+    const metricsLinks = effectiveWorkloads
+      .map(w => ({ url: buildGrafanaMetricsUrl(destinationNamespace, w.name, w.type), label: w.name }))
+      .filter(link => link.url);
+    if (metricsLinks.length > 0) {
+      categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: 'ok', links: metricsLinks });
+    }
   }
 
   if (VAULT_BASE_URL) {
