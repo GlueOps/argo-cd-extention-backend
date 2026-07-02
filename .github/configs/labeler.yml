@@ -1,0 +1,29 @@
+backend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/**'
+          - 'server.js'
+          - 'package.json'
+          - 'package-lock.json'
+          - 'test-links.js'
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Dockerfile'
+          - '.dockerignore'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+
+deployment:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'manifests/**'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
