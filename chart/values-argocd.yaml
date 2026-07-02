@@ -1,0 +1,19 @@
+# Environment overrides matching manifests/argocd-backend.yaml.
+# Install into the `argocd` namespace:
+#   helm install argocd-extension-backend-api chart/ -n argocd -f chart/values-argocd.yaml
+
+# Bounded to "argocd" instead of the old "*" -- see the RBAC warning in
+# templates/rbac.yaml for why unbounded "*" (cluster-wide secrets:list) is
+# avoided here.
+allowedNamespaces: "argocd"
+
+env:
+  prometheusBaseUrl: "http://kps-prometheus.glueops-core-kube-prometheus-stack.svc.cluster.local:9090"
+  tempoBaseUrl: ""
+  grafanaBaseUrl: ""
+  vaultBaseUrl: ""
+  deploymentConfigRepoUrl: ""
+  argocdAppNamespaces: "argocd,glueops-core"
+
+networkPolicy:
+  enabled: true

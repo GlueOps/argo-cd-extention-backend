@@ -1,0 +1,19 @@
+apiVersion: v2
+name: argocd-extension-backend-api
+description: >-
+  Backend API for the Argo CD UI extension: context-aware links (Grafana,
+  Vault, deployment config), and a locked-down Prometheus/Tempo proxy for the
+  extension's data plane.
+type: application
+version: 0.1.0
+appVersion: "0.1.1"
+home: https://github.com/GlueOps/argo-cd-extention-backend
+sources:
+  - https://github.com/GlueOps/argo-cd-extention-backend
+maintainers:
+  - name: GlueOps
+keywords:
+  - argocd
+  - argo-cd
+  - extension
+  - backend

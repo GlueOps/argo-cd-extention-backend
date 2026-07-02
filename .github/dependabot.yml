@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Keep GitHub Actions current and let Dependabot pin them to commit SHAs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keep npm dependencies (and the committed lockfile) patched.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Base image updates for the Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

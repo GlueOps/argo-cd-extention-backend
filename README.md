@@ -1,25 +1,55 @@
 # Argo CD Extension Backend API
 
-This repository owns the backend service for the Argo CD extension.
+Backend service for the GlueOps Argo CD UI extension. It resolves an Argo CD
+Application to context-aware links (Grafana logs/metrics/traces, Vault secrets,
+deployment-config repo) and proxies Prometheus/Tempo queries for the UI panels.
+
+## Security model (read this first)
+
+This service trusts the `Argocd-Application-Name` / `Argocd-Project-Name` headers
+that the **argocd-server extension proxy** injects *after* it has enforced the
+user's `extensions, invoke` RBAC. That trust is only valid if the backend is
+reachable **only** through that proxy. Two controls enforce this and both must be
+in place:
+
+1. A `NetworkPolicy` restricting ingress to the `argocd-server` pod (shipped in the
+   Helm chart and raw manifests).
+2. The app rejects requests without a well-formed app-context header (`401`), and
+   enforces `ALLOWED_NAMESPACES` on both the Application namespace and its
+   destination namespace.
+
+Do **not** expose this Service via an Ingress/LoadBalancer.
 
 ## Endpoints
 
-- `GET /healthz` - Health check endpoint
-- `GET /api/links` - Context-aware links (Phase 1.1+)
-- `GET /api/datasources/proxy/prometheus/api/v1/query` - Prometheus query proxy
-- `GET /api/datasources/proxy/tempo/api/search` - Tempo search proxy
+- `GET /healthz` — liveness (always `200` while the process is up).
+- `GET /readyz` — readiness; `503` until the in-cluster Kubernetes client is initialized.
+- `GET /api/links` — context-aware links for an application.
+- `GET /api/datasources/proxy/prometheus/api/v1/query` — Prometheus query proxy (requires app header).
+- `GET /api/datasources/proxy/tempo/api/search` — Tempo search proxy (requires app header).
 
 ### GET /api/links
 
-Returns context-aware links for an application (Grafana logs/traces, Vault secrets, deployment config).
+**Request headers**
 
-**Request Headers:**
-- `Argocd-Application-Name`: `namespace:appName` (required)
-- `Argocd-Project-Name`: Project name (optional)
+- `Argocd-Application-Name`: `namespace:appName` (required).
+- `Argocd-Project-Name`: project name (optional; if present it must match the
+  resolved Application's `spec.project`, else `403`).
 
-**Response:**
+**Behavior**
+
+Workload names are taken from the Application's authoritative
+`status.resources[]`. If that is empty, the app falls back to live-listing
+workloads in the destination namespace, and only as a last resort infers a single
+workload from the app name — in which case the affected categories are marked
+`status: "degraded"` and a top-level `warnings[]` entry is added.
+
+**Response**
+
 ```json
 {
+  "status": "ok",
+  "warnings": [],
   "categories": [
     {
       "id": "logs",
@@ -27,52 +57,93 @@ Returns context-aware links for an application (Grafana logs/traces, Vault secre
       "icon": "📋",
       "status": "ok",
       "links": [
-        {
-          "url": "https://grafana.example.com/d/logs?var-namespace=default&var-pod=myapp-xyz",
-          "label": "View Logs"
-        }
+        { "url": "https://grafana.example.com/d/<logs-uid>?orgId=1&var-workload=checkout-web&var-search=", "label": "checkout-web" }
       ]
+    },
+    {
+      "id": "vault-secrets",
+      "label": "Secrets",
+      "icon": "🔐",
+      "status": "empty",
+      "count": 0,
+      "links": []
     }
   ],
-  "metadata": {
-    "last_updated": "2026-06-23T10:00:00.000Z",
-    "max_rows": 4
-  }
+  "metadata": { "last_updated": "2026-07-02T10:00:00.000Z", "max_rows": 4 }
 }
 ```
 
-## Environment Variables
+Response contract notes for UI consumers:
 
-- `PORT` (default: `8000`, valid range `1..65535`)
-- `LOG_LEVEL` (`INFO` or `DEBUG`, default: `INFO`)
-- `REQUEST_TIMEOUT_MS` (default: `8000`, valid range `1..2147483647`)
+- Top-level `status` is `"ok"` or `"degraded"`; `warnings[]` explains any degradation.
+- Every category always has a `links` array (possibly empty) — safe to `.map()`.
+- Category `status` is one of `ok` | `degraded` | `empty`.
+- `vault-secrets` includes a numeric `count`.
+- One link is emitted **per discovered workload**; `label` is the workload name.
+- Error responses use `{ "status": "error", "errorType": "...", "error": "..." }`.
+- Responses are `Cache-Control: no-store` and `Vary: Argocd-Application-Name`.
 
-### Observability Configuration
+## Environment variables
 
-- `PROMETHEUS_BASE_URL` (required for metrics proxy)
-- `TEMPO_BASE_URL` (optional; if unset, traces return empty)
-- `TEMPO_SEARCH_PATH` (default: `/api/search`, must be relative path)
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `8000` | Listen port (1–65535). |
+| `LOG_LEVEL` | `INFO` | `INFO` or `DEBUG`. |
+| `REQUEST_TIMEOUT_MS` | `8000` | Timeout for upstream HTTP **and** Kubernetes API calls. |
+| `ALLOWED_NAMESPACES` | `*` | Comma-separated allow-list, or `*`. **`*` plus broad RBAC is unsafe on shared clusters — set a bounded list.** |
+| `ARGOCD_APP_NAMESPACES` | `argocd,glueops-core` | Namespaces to look up Application CRs in. |
+| `PROMETHEUS_BASE_URL` | — | Enables the Prometheus proxy. |
+| `TEMPO_BASE_URL` | — | Enables the Tempo proxy (empty ⇒ `{ "traces": [] }`). |
+| `TEMPO_SEARCH_PATH` | `/api/search` | Relative search path on Tempo. |
+| `GRAFANA_BASE_URL` | — | Enables Grafana logs/metrics/traces links. |
+| `GRAFANA_LOGS_DASHBOARD` | `tBmi6B0Vz/loki-workload-logs` | Logs dashboard `uid` or `uid/slug`. |
+| `GRAFANA_METRICS_DASHBOARD` | `a164a7f0.../kubernetes-compute-resources-workload` | Metrics dashboard. |
+| `GRAFANA_TRACES_DASHBOARD` | — | Traces dashboard; unset ⇒ Grafana Explore fallback. |
+| `CLUSTER_NAME` | — | Value for the metrics dashboard's `var-cluster` (set when one Grafana serves multiple clusters). |
+| `VAULT_BASE_URL` | — | Enables Vault secret links (from ExternalSecret `remoteRef.key`). |
+| `DEPLOYMENT_CONFIG_REPO_URL` | — | Deployment-config repo (used to derive config + secret links). |
+| `CONFIG_REPO_LOCAL_ROOT` | — | Optional local checkout of the config repo (reads are confined to this root). |
+| `GITHUB_TOKEN` | — | Optional; authenticates GitHub Contents API for private config repos (provide via a Secret). |
 
-### Links Configuration (Phase 1.1+)
+See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-environment examples.
 
-- `GRAFANA_BASE_URL` (optional; enables Grafana logs/traces links)
-- `VAULT_BASE_URL` (optional; enables Vault secrets links)
-- `DEPLOYMENT_CONFIG_REPO_URL` (optional; enables deployment config links)
-- `ALLOWED_NAMESPACES` (default: `*`; comma-separated list or wildcard)
+## Deployment
 
-## Local Run
+The Helm chart under [`chart/`](chart/) is the source of truth (RBAC, securityContext,
+NetworkPolicy, PDB, probes are defined once and templated per environment):
 
 ```bash
-npm install
+helm install argocd-extension-backend-api ./chart -n argocd -f chart/values-argocd.yaml
+helm install argocd-extension-backend-api ./chart -n glueops-core -f chart/values-venus.yaml
+```
+
+The raw manifests in [`manifests/`](manifests/) are a self-contained fallback kept
+in sync with the chart.
+
+## Local development
+
+```bash
+npm ci
 PORT=8000 \
+LOG_LEVEL=DEBUG \
 PROMETHEUS_BASE_URL=http://localhost:9090 \
-TEMPO_BASE_URL=http://localhost:3200 \
 GRAFANA_BASE_URL=https://grafana.example.com \
 VAULT_BASE_URL=https://vault.example.com \
 DEPLOYMENT_CONFIG_REPO_URL=https://github.com/org/deployment-configs \
 npm start
 ```
 
-## Release Model
+Outside a cluster the Kubernetes client stays uninitialized, so `/readyz` returns
+`503` and `/api/links` falls back to inferred (degraded) workloads — expected locally.
 
-This repository publishes the backend image independently from the UI extension repository.
+## Tests
+
+```bash
+npm test   # node --test — unit tests for pure helpers + integration tests over the Express app
+```
+
+## Release model
+
+Images publish to `ghcr.io/glueops/argocd-extension-backend-api` on GitHub Release
+creation. The workflow runs tests, builds with SBOM + provenance attestations, and
+fails on fixable critical CVEs (Trivy).

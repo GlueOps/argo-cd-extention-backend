@@ -1,0 +1,20 @@
+# Environment overrides matching manifests/venus-backend.yaml.
+# Install into the `glueops-core` namespace (serves the `nonprod` Argo CD
+# Application namespace):
+#   helm install argocd-extension-backend-api chart/ -n glueops-core -f chart/values-venus.yaml
+
+# Only Applications destined for the "nonprod" namespace may query this
+# backend; RBAC (templates/rbac.yaml) is scoped to a Role/RoleBinding in the
+# "nonprod" namespace rather than a cluster-wide ClusterRole.
+allowedNamespaces: "nonprod"
+
+env:
+  prometheusBaseUrl: "http://kps-prometheus.glueops-core-kube-prometheus-stack.svc.cluster.local:9090"
+  tempoBaseUrl: ""
+  grafanaBaseUrl: "https://grafana.nonprod.venus.onglueops.rocks"
+  vaultBaseUrl: "https://vault.nonprod.venus.onglueops.rocks"
+  deploymentConfigRepoUrl: "https://github.com/GlueOps/deployment-configurations"
+  argocdAppNamespaces: "argocd,glueops-core"
+
+networkPolicy:
+  enabled: true

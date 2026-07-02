@@ -65,6 +65,11 @@ const GRAFANA_METRICS_DASHBOARD = (process.env.GRAFANA_METRICS_DASHBOARD || 'a16
 // traces dashboard UID to get a real dashboard link; otherwise traces falls back to Explore.
 const GRAFANA_TRACES_DASHBOARD = (process.env.GRAFANA_TRACES_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
 
+// Optional cluster identifier for the metrics dashboard's `var-cluster` template var.
+// Leave unset for single-cluster Grafana; set it when one Grafana serves multiple
+// clusters that share namespace/workload names (otherwise the link is ambiguous).
+const CLUSTER_NAME = (process.env.CLUSTER_NAME || '').trim();
+
 // Validate URLs are well-formed if provided
 if (GRAFANA_BASE_URL && !/^https?:\/\//.test(GRAFANA_BASE_URL)) {
   console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(GRAFANA_BASE_URL)}`);
@@ -103,6 +108,42 @@ try {
   // This is OK - we'll gracefully degrade if k8s client isn't available
 }
 
+// The @kubernetes/client-node calls used below have no built-in timeout, so a
+// wedged apiserver could make /api/links hang far past REQUEST_TIMEOUT_MS. Wrap
+// each call so it fails fast and degrades gracefully instead.
+function withTimeout(promise, label) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${REQUEST_TIMEOUT_MS}ms`)),
+      REQUEST_TIMEOUT_MS
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function isNamespaceAllowed(namespace) {
+  if (ALLOWED_NAMESPACES === '*') return true;
+  const allowedList = ALLOWED_NAMESPACES.split(',').map((s) => s.trim()).filter(Boolean);
+  return allowedList.includes(namespace);
+}
+
+// Argo CD Applications can target a remote cluster (spec.destination.server/name).
+// Our in-cluster client only sees the local cluster, so live discovery there is
+// meaningless — detect this so we can rely on status.resources[] instead of guessing.
+const IN_CLUSTER_SERVERS = new Set([
+  'https://kubernetes.default.svc',
+  'https://kubernetes.default.svc.cluster.local'
+]);
+function isRemoteCluster(destination) {
+  if (!destination || typeof destination !== 'object') return false;
+  const name = typeof destination.name === 'string' ? destination.name.trim() : '';
+  if (name) return name !== 'in-cluster';
+  const server = typeof destination.server === 'string' ? destination.server.trim().replace(/\/$/, '') : '';
+  if (!server) return false;
+  return !IN_CLUSTER_SERVERS.has(server);
+}
+
 function normalizeGitRepoUrl(repoUrl) {
   if (typeof repoUrl !== 'string') return '';
   return repoUrl.replace(/\.git$/, '').replace(/\/$/, '');
@@ -130,7 +171,9 @@ function buildGitTreeUrl(repoUrl, revision, relativePath) {
   const encodedPath = encodePathSegments(relativePath.trim());
   if (!base || !encodedPath) return '';
   const lastSegment = relativePath.trim().split('/').filter(Boolean).pop() || '';
-  const isLikelyFile = /\.[A-Za-z0-9]+$/.test(lastSegment);
+  // Only treat known config file extensions as files, so dotted *directory* names
+  // (e.g. "v2.1", "billing.internal") aren't mistaken for files and linked as blobs.
+  const isLikelyFile = /\.(ya?ml|json|tpl|txt|md|toml|ini|conf|cfg|env|properties)$/i.test(lastSegment);
   const mode = isLikelyFile ? 'blob' : 'tree';
   return `${base}/${mode}/${encodedRevision}/${encodedPath}`;
 }
@@ -150,14 +193,18 @@ function extractRefPath(valueFile) {
   return { ref: match[1], path: match[2] };
 }
 
+// Turn a value-file path into the app's config *directory*. Returning the directory
+// that actually contains the file handles nested layouts (e.g.
+// "apps/team-a/backend/values.yaml" -> "apps/team-a/backend"), unlike assuming a
+// flat "apps/<name>" shape which pointed at a too-shallow grouping directory.
 function extractAppConfigPath(pathValue) {
   if (typeof pathValue !== 'string' || pathValue.trim() === '') return '';
   const parts = pathValue.split('/').filter(Boolean);
-  const appsIdx = parts.indexOf('apps');
-  if (appsIdx >= 0 && appsIdx + 1 < parts.length) {
-    return `apps/${parts[appsIdx + 1]}`;
-  }
-  return pathValue;
+  if (parts.length === 0) return pathValue;
+  const last = parts[parts.length - 1];
+  const isFile = /\.[A-Za-z0-9]+$/.test(last);
+  const dirParts = isFile ? parts.slice(0, -1) : parts;
+  return dirParts.length > 0 ? dirParts.join('/') : pathValue;
 }
 
 function parseGitHubRepo(repoUrl) {
@@ -222,7 +269,7 @@ function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
   if (!workloadName) return '';
   return buildGrafanaDashboardUrl(GRAFANA_METRICS_DASHBOARD, {
     'var-datasource': 'default',
-    'var-cluster': '',
+    'var-cluster': CLUSTER_NAME,
     'var-namespace': namespace || '',
     'var-type': workloadType || 'deployment',
     'var-workload': workloadName,
@@ -320,10 +367,18 @@ async function fetchText(url, headers) {
 
 async function readConfigRepoFileText(repoUrl, revision, relativePath) {
   if (CONFIG_REPO_LOCAL_ROOT && normalizeGitRepoUrl(repoUrl) === normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) {
-    try {
-      return await fs.readFile(path.join(CONFIG_REPO_LOCAL_ROOT, relativePath), 'utf8');
-    } catch (err) {
-      logDebug('local config repo read failed', { relativePath, message: err.message });
+    // relativePath originates from the Application spec's valueFiles; a "../" in it
+    // must not be able to read files outside the configured local root.
+    const root = path.resolve(CONFIG_REPO_LOCAL_ROOT);
+    const resolved = path.resolve(root, relativePath);
+    if (resolved === root || resolved.startsWith(root + path.sep)) {
+      try {
+        return await fs.readFile(resolved, 'utf8');
+      } catch (err) {
+        logDebug('local config repo read failed', { relativePath, message: err.message });
+      }
+    } else {
+      logDebug('local config repo path escapes root; skipping', { relativePath });
     }
   }
 
@@ -379,17 +434,21 @@ async function buildExternalSecretLinksFromConfig(appObj) {
   const valueFiles = collectAppSpecificValueFiles(appObj);
   const secretPaths = new Map();
 
-  for (const valueFile of valueFiles) {
-    const body = await readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path);
-    const remoteRefKeys = extractRemoteRefKeysFromYaml(body);
-    remoteRefKeys.forEach(secretPath => {
+  // Fetch the value files concurrently rather than one-at-a-time; each fetch is
+  // independent and already bounded by REQUEST_TIMEOUT_MS.
+  const bodies = await Promise.all(
+    valueFiles.map(valueFile => readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path))
+  );
+
+  bodies.forEach(body => {
+    extractRemoteRefKeysFromYaml(body).forEach(secretPath => {
       const url = buildVaultSecretUrl(secretPath);
       const label = labelFromSecretPath(secretPath);
       if (url && label && !secretPaths.has(url)) {
         secretPaths.set(url, { url, label });
       }
     });
-  }
+  });
 
   return Array.from(secretPaths.values());
 }
@@ -449,7 +508,10 @@ async function getArgoApplication(namespace, appName) {
 
   for (const ns of candidateNamespaces) {
     try {
-      const response = await k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', ns, 'applications', normalizedAppName);
+      const response = await withTimeout(
+        k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', ns, 'applications', normalizedAppName),
+        `getArgoApplication(${ns})`
+      );
       if (response && response.body && typeof response.body === 'object') {
         return response.body;
       }
@@ -459,9 +521,19 @@ async function getArgoApplication(namespace, appName) {
   }
 
   try {
-    const response = await k8sCustomObjectsApi.listClusterCustomObject('argoproj.io', 'v1alpha1', 'applications');
+    const response = await withTimeout(
+      k8sCustomObjectsApi.listClusterCustomObject('argoproj.io', 'v1alpha1', 'applications'),
+      'getArgoApplication(cluster)'
+    );
     const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
-    const match = items.find(item => item && item.metadata && item.metadata.name === normalizedAppName);
+    // Match on BOTH name AND the requested namespace. Matching by name alone can
+    // silently resolve to a different tenant's identically-named Application
+    // (a real cross-tenant data-leak path on any transient namespaced-lookup failure).
+    const match = items.find(item =>
+      item && item.metadata &&
+      item.metadata.name === normalizedAppName &&
+      item.metadata.namespace === normalizedNamespace
+    );
     return match || null;
   } catch (err) {
     logDebug('getArgoApplication cluster lookup failed', err.message);
@@ -469,38 +541,30 @@ async function getArgoApplication(namespace, appName) {
   }
 }
 
-async function getRelatedSecrets(namespace, appName, trackingId) {
-  if (!k8sApi) return [];
-  if (typeof namespace !== 'string' || namespace.trim() === '') return [];
-  if (typeof appName !== 'string' || appName.trim() === '') return [];
+const WORKLOAD_KIND_TYPES = { Deployment: 'deployment', StatefulSet: 'statefulset', DaemonSet: 'daemonset' };
 
-  try {
-    const response = await k8sApi.listNamespacedSecret(namespace);
-    const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
-    const normalizedTracking = typeof trackingId === 'string' ? trackingId.toLowerCase() : '';
-
-    const names = items
-      .filter(secret => {
-        const md = secret && secret.metadata && typeof secret.metadata === 'object' ? secret.metadata : {};
-        const labels = md.labels && typeof md.labels === 'object' ? md.labels : {};
-        const annotations = md.annotations && typeof md.annotations === 'object' ? md.annotations : {};
-        const name = typeof md.name === 'string' ? md.name : '';
-        const tracking = typeof annotations['argocd.argoproj.io/tracking-id'] === 'string' ? annotations['argocd.argoproj.io/tracking-id'] : '';
-        return (
-          (typeof labels['argocd.argoproj.io/instance'] === 'string' && labels['argocd.argoproj.io/instance'] === appName) ||
-          (typeof labels['app.kubernetes.io/instance'] === 'string' && labels['app.kubernetes.io/instance'] === appName) ||
-          (tracking && normalizedTracking && tracking.toLowerCase().includes(normalizedTracking))
-        );
-      })
-      .map(secret => secret.metadata && typeof secret.metadata.name === 'string' ? secret.metadata.name : '')
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b));
-
-    return Array.from(new Set(names));
-  } catch (err) {
-    logDebug('getRelatedSecrets failed', err.message);
-    return [];
-  }
+// Argo CD records every resource it manages in status.resources[] — an authoritative,
+// tracking-based list. Prefer it over re-deriving workload membership by label guessing
+// (which is fragile and needs broad cluster read access). Works for remote-cluster
+// destinations too, since Argo populates it regardless of where resources live.
+function workloadsFromAppStatus(appObj, destinationNamespace) {
+  const status = appObj && appObj.status && typeof appObj.status === 'object' ? appObj.status : {};
+  const resources = Array.isArray(status.resources) ? status.resources : [];
+  const seen = new Set();
+  const workloads = [];
+  resources.forEach(r => {
+    if (!r || typeof r !== 'object') return;
+    const type = WORKLOAD_KIND_TYPES[r.kind];
+    if (!type) return;
+    const name = typeof r.name === 'string' ? r.name.trim() : '';
+    if (!name) return;
+    const namespace = typeof r.namespace === 'string' && r.namespace.trim() ? r.namespace.trim() : destinationNamespace;
+    const key = `${type}/${namespace}/${name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    workloads.push({ name, type, namespace });
+  });
+  return workloads;
 }
 
 async function getRelatedExternalSecretLinks(namespace, appName) {
@@ -509,7 +573,10 @@ async function getRelatedExternalSecretLinks(namespace, appName) {
   if (typeof appName !== 'string' || appName.trim() === '') return [];
 
   try {
-    const response = await k8sCustomObjectsApi.listNamespacedCustomObject('external-secrets.io', 'v1', namespace, 'externalsecrets');
+    const response = await withTimeout(
+      k8sCustomObjectsApi.listNamespacedCustomObject('external-secrets.io', 'v1', namespace, 'externalsecrets'),
+      'listExternalSecrets'
+    );
     const items = response && response.body && Array.isArray(response.body.items) ? response.body.items : [];
     const secretLinks = new Map();
 
@@ -554,10 +621,12 @@ async function getRelatedExternalSecretLinks(namespace, appName) {
   }
 }
 
-// Decide whether a workload's metadata belongs to the given ArgoCD app. Prefer the
-// instance labels ArgoCD/Helm stamp on managed resources; fall back to exact name match.
-// Name-prefix matching is deliberately avoided here to prevent cross-app collisions
-// (e.g. "api" matching "api-worker").
+// Decide whether a workload's metadata belongs to the given ArgoCD app. Only the
+// instance labels ArgoCD/Helm stamp on *managed* resources are trusted, plus an exact
+// name match. The bare `app` label is deliberately NOT matched: it's a loose, widely
+// reused convention, so matching it can cross-attribute an unrelated workload's
+// pods/logs/metrics to this app. (This live-listing path is only a fallback; the
+// primary source is Argo's authoritative status.resources[] via workloadsFromAppStatus.)
 function metadataMatchesApp(metadata, appName) {
   const md = metadata && typeof metadata === 'object' ? metadata : {};
   const labels = md.labels && typeof md.labels === 'object' ? md.labels : {};
@@ -565,26 +634,25 @@ function metadataMatchesApp(metadata, appName) {
     labels['argocd.argoproj.io/instance'] === appName ||
     labels['app.kubernetes.io/instance'] === appName ||
     labels['app.kubernetes.io/name'] === appName ||
-    labels['app'] === appName ||
     md.name === appName
   );
 }
 
-// Query the workloads (Deployments, StatefulSets, DaemonSets) and pods that make up an app.
-// Each workload carries its kube "type" so callers can build type-aware dashboard links.
+// Fallback workload discovery when status.resources[] is empty: list the workload
+// kinds in the destination namespace and match by instance label / exact name. Each
+// workload carries its kube "type" and namespace so callers can build type-aware links.
 async function getAppResources(namespace, appName) {
-  const empty = { podNames: [], deploymentNames: [], workloads: [] };
-  if (!k8sApi || !k8sAppsApi) return empty;
+  if (!k8sAppsApi) return [];
 
   const workloads = [];
   const collect = async (listFn, type) => {
     try {
-      const resp = await listFn(namespace);
+      const resp = await withTimeout(listFn(namespace), `list ${type}`);
       (resp.body.items || [])
         .filter(item => metadataMatchesApp(item.metadata, appName))
         .forEach(item => {
           if (item.metadata && typeof item.metadata.name === 'string') {
-            workloads.push({ name: item.metadata.name, type });
+            workloads.push({ name: item.metadata.name, type, namespace });
           }
         });
     } catch (err) {
@@ -592,31 +660,14 @@ async function getAppResources(namespace, appName) {
     }
   };
 
-  try {
-    await Promise.all([
-      collect(ns => k8sAppsApi.listNamespacedDeployment(ns), 'deployment'),
-      collect(ns => k8sAppsApi.listNamespacedStatefulSet(ns), 'statefulset'),
-      collect(ns => k8sAppsApi.listNamespacedDaemonSet(ns), 'daemonset')
-    ]);
+  await Promise.all([
+    collect(ns => k8sAppsApi.listNamespacedDeployment(ns), 'deployment'),
+    collect(ns => k8sAppsApi.listNamespacedStatefulSet(ns), 'statefulset'),
+    collect(ns => k8sAppsApi.listNamespacedDaemonSet(ns), 'daemonset')
+  ]);
 
-    let podNames = [];
-    try {
-      const podsResp = await k8sApi.listNamespacedPod(namespace);
-      podNames = (podsResp.body.items || [])
-        .filter(pod => metadataMatchesApp(pod.metadata, appName))
-        .map(pod => pod.metadata.name)
-        .filter(Boolean);
-    } catch (err) {
-      logDebug('getAppResources pod lookup failed', err.message);
-    }
-
-    const deploymentNames = workloads.filter(w => w.type === 'deployment').map(w => w.name);
-    logDebug('app resources queried', { namespace, appName, workloads, podNames });
-    return { podNames, deploymentNames, workloads };
-  } catch (err) {
-    logDebug('getAppResources failed', err.message);
-    return empty;
-  }
+  logDebug('app resources queried', { namespace, appName, workloads });
+  return workloads;
 }
 
 function buildQueryString(query) {
@@ -674,16 +725,13 @@ function requireArgoAppContext(req, res, next) {
       error: 'missing Argocd-Application-Name header; requests must arrive via the Argo CD extension proxy'
     });
   }
-  if (ALLOWED_NAMESPACES !== '*') {
-    const namespace = appNameHeader.split(':', 1)[0];
-    const allowedList = ALLOWED_NAMESPACES.split(',').map((s) => s.trim());
-    if (!allowedList.includes(namespace)) {
-      return res.status(403).json({
-        status: 'error',
-        errorType: 'forbidden',
-        error: `Namespace ${namespace} is not allowed`
-      });
-    }
+  const namespace = appNameHeader.split(':', 1)[0];
+  if (!isNamespaceAllowed(namespace)) {
+    return res.status(403).json({
+      status: 'error',
+      errorType: 'forbidden',
+      error: `Namespace ${namespace} is not allowed`
+    });
   }
   return next();
 }
@@ -718,12 +766,32 @@ async function fetchJson(url) {
   }
 }
 
+// Liveness: always 200 once the process is up and the event loop is responsive.
+// Kubernetes should restart the pod only if this stops responding, not because
+// a downstream dependency (k8s API, Prometheus, etc.) is unavailable.
 app.get('/healthz', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Readiness: reflects whether the in-cluster Kubernetes client initialized
+// successfully. Most of this API's value (workload/secret discovery) depends
+// on that client, so keep the pod out of Service endpoints until it's ready
+// rather than serving degraded responses.
+app.get('/readyz', (_req, res) => {
+  const ready = Boolean(k8sApi && k8sAppsApi && k8sCustomObjectsApi);
+  if (!ready) {
+    return res.status(503).json({ status: 'not_ready', reason: 'kubernetes client not initialized' });
+  }
+  return res.json({ status: 'ok' });
+});
+
 app.get('/api/links', async (req, res) => {
-  // Extract app context from headers
+  // This response is keyed by the Argocd-Application-Name request header and exposes
+  // per-application data. Prevent any shared/browser/intermediary cache from reusing
+  // one app's links for another (caches key on URL, not header, unless told via Vary).
+  res.set('Cache-Control', 'no-store');
+  res.set('Vary', 'Argocd-Application-Name');
+
   const appNameHeader = req.get('Argocd-Application-Name') || '';
   const projectName = req.get('Argocd-Project-Name') || '';
 
@@ -737,85 +805,108 @@ app.get('/api/links', async (req, res) => {
 
   const [namespace, appName] = appNameHeader.split(':', 2);
 
-  // Check if namespace is allowed
-  if (ALLOWED_NAMESPACES !== '*') {
-    const allowedList = ALLOWED_NAMESPACES.split(',').map(s => s.trim());
-    if (!allowedList.includes(namespace)) {
-      return res.status(403).json({
-        status: 'error',
-        errorType: 'forbidden',
-        error: `Namespace ${namespace} is not allowed`
-      });
-    }
+  if (!isNamespaceAllowed(namespace)) {
+    return res.status(403).json({
+      status: 'error',
+      errorType: 'forbidden',
+      error: `Namespace ${namespace} is not allowed`
+    });
   }
 
   logDebug('links request', { namespace, appName, projectName });
 
   const appObj = await getArgoApplication(namespace, appName);
-  const appMetadata = appObj && appObj.metadata && typeof appObj.metadata === 'object' ? appObj.metadata : {};
   const appSpec = appObj && appObj.spec && typeof appObj.spec === 'object' ? appObj.spec : {};
-  const trackingId = appMetadata.annotations && typeof appMetadata.annotations === 'object'
-    ? appMetadata.annotations['argocd.argoproj.io/tracking-id'] || ''
-    : '';
-  const destinationNamespace = appSpec.destination && typeof appSpec.destination === 'object' && typeof appSpec.destination.namespace === 'string'
-    ? appSpec.destination.namespace
+
+  // Defense in depth: if Argo CD supplied the project, it must match the resolved
+  // Application. A mismatch signals a stale/forged header or a misrouted request.
+  if (appObj && projectName && typeof appSpec.project === 'string' && appSpec.project !== projectName) {
+    return res.status(403).json({
+      status: 'error',
+      errorType: 'forbidden',
+      error: 'Argocd-Project-Name does not match the resolved application project'
+    });
+  }
+
+  const destination = appSpec.destination && typeof appSpec.destination === 'object' ? appSpec.destination : {};
+  const destinationNamespace = typeof destination.namespace === 'string' && destination.namespace
+    ? destination.namespace
     : namespace;
 
-  // Query Kubernetes for the app's workloads (deployments/statefulsets/daemonsets) and pods.
-  const { workloads } = await getAppResources(destinationNamespace, appName);
-  const secretNames = await getRelatedSecrets(destinationNamespace, appName, trackingId);
-  const externalSecretLinks = await getRelatedExternalSecretLinks(destinationNamespace, appName);
-  const configExternalSecretLinks = await buildExternalSecretLinksFromConfig(appObj);
-  const configRepoLinks = buildConfigRepoLinks(appObj);
+  // Also gate the namespace we actually read from: destination can differ from the
+  // Application's own namespace and point at something not intended to be exposed.
+  if (!isNamespaceAllowed(destinationNamespace)) {
+    return res.status(403).json({
+      status: 'error',
+      errorType: 'forbidden',
+      error: `Destination namespace ${destinationNamespace} is not allowed`
+    });
+  }
 
-  // Fall back to the app name as a single deployment-typed workload when discovery turns up
-  // nothing (k8s API unavailable, RBAC, or labels missing).
-  const effectiveWorkloads = workloads.length > 0
-    ? workloads
-    : [{ name: appName, type: 'deployment' }];
+  const isRemoteDestination = isRemoteCluster(destination);
+  const warnings = [];
 
-  // Build categories response matching UI extension expectations
+  // Workload discovery: (1) prefer Argo's authoritative status.resources[];
+  // (2) fall back to live listing on THIS cluster only; (3) last resort, infer from
+  // the app name and flag the result as degraded so the UI/user isn't misled into
+  // trusting a guessed workload name.
+  let workloads = workloadsFromAppStatus(appObj, destinationNamespace);
+  let workloadsInferred = false;
+  if (workloads.length === 0 && !isRemoteDestination) {
+    workloads = await getAppResources(destinationNamespace, appName);
+  }
+  if (workloads.length === 0) {
+    workloads = [{ name: appName, type: 'deployment', namespace: destinationNamespace }];
+    workloadsInferred = true;
+    warnings.push('workload names could not be discovered; links use the application name as a best-effort guess');
+  }
+
+  // Secret links come only from ExternalSecret remoteRef keys (real Vault paths).
+  // Live ExternalSecrets live on the local cluster, so skip them for remote destinations.
+  const [externalSecretLinks, configExternalSecretLinks, configRepoLinks] = await Promise.all([
+    isRemoteDestination ? Promise.resolve([]) : getRelatedExternalSecretLinks(destinationNamespace, appName),
+    buildExternalSecretLinksFromConfig(appObj),
+    Promise.resolve(buildConfigRepoLinks(appObj))
+  ]);
+
+  const workloadStatus = workloadsInferred ? 'degraded' : 'ok';
   const categories = [];
 
   if (GRAFANA_BASE_URL) {
-    const logsLinks = effectiveWorkloads
+    const logsLinks = workloads
       .map(w => ({ url: buildGrafanaLogsUrl(w.name), label: w.name }))
       .filter(link => link.url);
     if (logsLinks.length > 0) {
-      categories.push({ id: 'logs', label: 'Logs', icon: '📋', status: 'ok', links: logsLinks });
+      categories.push({ id: 'logs', label: 'Logs', icon: '📋', status: workloadStatus, links: logsLinks });
     }
 
-    const tracesLinks = effectiveWorkloads
-      .map(w => ({ url: buildGrafanaTracesUrl(destinationNamespace, w.name), label: w.name }))
+    const tracesLinks = workloads
+      .map(w => ({ url: buildGrafanaTracesUrl(w.namespace || destinationNamespace, w.name), label: w.name }))
       .filter(link => link.url);
     if (tracesLinks.length > 0) {
-      categories.push({ id: 'traces', label: 'Traces', icon: '⏱️', status: 'ok', links: tracesLinks });
+      categories.push({ id: 'traces', label: 'Traces', icon: '⏱️', status: workloadStatus, links: tracesLinks });
     }
 
-    const metricsLinks = effectiveWorkloads
-      .map(w => ({ url: buildGrafanaMetricsUrl(destinationNamespace, w.name, w.type), label: w.name }))
+    const metricsLinks = workloads
+      .map(w => ({ url: buildGrafanaMetricsUrl(w.namespace || destinationNamespace, w.name, w.type), label: w.name }))
       .filter(link => link.url);
     if (metricsLinks.length > 0) {
-      categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: 'ok', links: metricsLinks });
+      categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: workloadStatus, links: metricsLinks });
     }
   }
 
   if (VAULT_BASE_URL) {
-    let secretLinks = externalSecretLinks;
-    if (secretLinks.length === 0) {
-      secretLinks = secretNames.map(secretName => ({
-        url: `${VAULT_BASE_URL}/ui/vault/secrets/secret/list/${encodeURIComponent(secretName)}/`,
-        label: secretName
-      }));
-    }
-    if (secretLinks.length === 0) {
-      secretLinks = configExternalSecretLinks;
-    }
+    const secretMap = new Map();
+    [...externalSecretLinks, ...configExternalSecretLinks].forEach(link => {
+      if (link && link.url && !secretMap.has(link.url)) secretMap.set(link.url, link);
+    });
+    const secretLinks = Array.from(secretMap.values());
     categories.push({
       id: 'vault-secrets',
-      label: `Secrets (${secretLinks.length})`,
+      label: 'Secrets',
+      count: secretLinks.length,
       icon: '🔐',
-      status: 'ok',
+      status: secretLinks.length > 0 ? 'ok' : 'empty',
       links: secretLinks
     });
   }
@@ -830,18 +921,29 @@ app.get('/api/links', async (req, res) => {
     });
   }
 
-  // If no services are configured, return an empty state
+  // Always emit a `links` array on every category (including this empty state) so
+  // generic UI rendering (`category.links.map(...)`) never throws.
   if (categories.length === 0) {
     categories.push({
       id: 'unconfigured',
       label: 'No Services Configured',
       icon: '⚠️',
       status: 'empty',
+      links: [],
       message: 'No external services (Grafana, Vault, etc.) are configured'
     });
   }
 
+  if (isRemoteDestination) {
+    warnings.push('application targets a remote cluster; live secret discovery is unavailable');
+  }
+  if (!appObj) {
+    warnings.push('the Argo CD Application could not be resolved; results may be incomplete');
+  }
+
   return res.status(200).json({
+    status: warnings.length > 0 ? 'degraded' : 'ok',
+    warnings,
     categories,
     metadata: {
       last_updated: new Date().toISOString(),
@@ -903,7 +1005,14 @@ app.get('/api/datasources/proxy/tempo/api/search', requireArgoAppContext, async 
 
     const result = await fetchJson(url);
     if (!result.ok) {
-      return res.status(result.status).json({ traces: [] });
+      // Signal the failure (so the UI can show "traces unavailable" rather than
+      // "no traces") while still returning a renderable empty `traces` array.
+      return res.status(502).json({
+        status: 'error',
+        errorType: 'upstream_error',
+        error: `upstream returned status ${result.status}`,
+        traces: []
+      });
     }
 
     if (result.payload && Array.isArray(result.payload.traces)) {
@@ -915,13 +1024,18 @@ app.get('/api/datasources/proxy/tempo/api/search', requireArgoAppContext, async 
     }
 
     return res.status(200).json({ traces: [] });
-  } catch (_err) {
-    return res.status(200).json({ traces: [] });
+  } catch (err) {
+    return res.status(502).json({
+      status: 'error',
+      errorType: 'proxy_error',
+      error: err.message,
+      traces: []
+    });
   }
 });
 
 app.use((_req, res) => {
-  res.status(404).json({ message: 'Not found' });
+  res.status(404).json({ status: 'error', errorType: 'not_found', error: 'Not found' });
 });
 
 function start() {
@@ -947,4 +1061,17 @@ if (require.main === module) {
   start();
 }
 
-module.exports = { app, start, buildUrl, buildQueryString, requireArgoAppContext };
+module.exports = {
+  app,
+  start,
+  buildUrl,
+  buildQueryString,
+  requireArgoAppContext,
+  isNamespaceAllowed,
+  isRemoteCluster,
+  metadataMatchesApp,
+  workloadsFromAppStatus,
+  extractAppConfigPath,
+  buildGitTreeUrl,
+  buildVaultSecretUrl
+};

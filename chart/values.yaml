@@ -1,0 +1,125 @@
+# Default values for the argocd-extension-backend-api chart.
+# This file documents every knob; environment-specific overrides live in
+# values-argocd.yaml (deployed into the `argocd` namespace) and
+# values-venus.yaml (deployed into `glueops-core`, serving the `nonprod`
+# Argo CD Application namespace). See chart/README.md for install commands.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/glueops/argocd-extension-backend-api
+  # NOTE: as of this writing the only published tag is the malformed
+  # "v.0.0.1". This chart defaults to "v0.1.1" (matching package.json's
+  # version) on the assumption that a properly tagged v0.1.1 image will be
+  # released before this chart is installed. Override image.tag if not.
+  tag: v0.1.1
+  pullPolicy: IfNotPresent
+
+# - name: ghcr-pull-secret
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Whether to create a ServiceAccount for the Deployment. Leave true; RBAC
+  # in templates/rbac.yaml binds to this ServiceAccount by name.
+  create: true
+  annotations: {}
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# ---------------------------------------------------------------------------
+# Namespace(s) whose Argo CD Applications this backend instance is allowed to
+# serve context/data for. Checked against the namespace prefix of the
+# `Argocd-Application-Name` header (and the Application's destination
+# namespace) -- this becomes the app's ALLOWED_NAMESPACES env var.
+#
+# This value ALSO drives the scope of the RBAC created by
+# templates/rbac.yaml:
+#   - a bounded comma-separated list (e.g. "argocd" or "nonprod,prod")
+#     creates a namespaced Role + RoleBinding in EACH listed namespace
+#     (least privilege -- recommended).
+#   - "*" creates a ClusterRole + ClusterRoleBinding instead, granting the
+#     same read verbs (Deployment/StatefulSet/DaemonSet + ExternalSecret
+#     listing) across every namespace in the cluster. Prefer a bounded list
+#     on shared/multi-tenant clusters -- see the comments in
+#     templates/rbac.yaml for details.
+# ---------------------------------------------------------------------------
+allowedNamespaces: "argocd"
+
+env:
+  logLevel: "INFO" # INFO | DEBUG
+  requestTimeoutMs: "8000"
+  prometheusBaseUrl: ""
+  tempoBaseUrl: ""
+  tempoSearchPath: "/api/search"
+  grafanaBaseUrl: ""
+  vaultBaseUrl: ""
+  deploymentConfigRepoUrl: ""
+  configRepoLocalRoot: ""
+  # Namespaces to additionally try when resolving an Argo CD Application by
+  # name before falling back to the cluster-wide list. Defaults match the
+  # app's own built-in default.
+  argocdAppNamespaces: "argocd,glueops-core"
+  grafanaLogsDashboard: ""
+  grafanaMetricsDashboard: ""
+  grafanaTracesDashboard: ""
+  # Optional cluster identifier used in Grafana dashboard template vars when
+  # one Grafana instance serves multiple clusters. Leave empty for
+  # single-cluster Grafana.
+  clusterName: ""
+
+# GITHUB_TOKEN is sensitive and is deliberately never accepted as a plain
+# value in this file. Create the Secret out-of-band (e.g. via an
+# ExternalSecret/SealedSecret) and point the chart at it by name; when
+# existingSecretName is empty, GITHUB_TOKEN is simply omitted from the
+# container (the app treats it as optional).
+githubToken:
+  existingSecretName: ""
+  existingSecretKey: "token"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+rbac:
+  # Set to false only if you manage RBAC for this ServiceAccount yourself.
+  create: true
+
+networkPolicy:
+  # Restrict ingress to only the argocd-server pod(s). Requires the CNI to
+  # enforce NetworkPolicy (see templates/networkpolicy.yaml comments).
+  enabled: true
+  argocdServerNamespaceSelector: {}
+  argocdServerPodSelector:
+    app.kubernetes.io/name: argocd-server
+
+podDisruptionBudget:
+  # Only takes effect when replicaCount > 1.
+  enabled: true
+  minAvailable: 1
+
+# Explicit topologySpreadConstraints take priority over the chart's default
+# preferred podAntiAffinity (see templates/deployment.yaml). Leave empty to
+# use the default anti-affinity, or set your own affinity below instead.
+topologySpreadConstraints: []
+
+# Custom affinity. If left empty (and topologySpreadConstraints is also
+# empty), the chart applies a default "preferred" podAntiAffinity spreading
+# replicas across nodes by app.kubernetes.io/name.
+affinity: {}
+
+nodeSelector: {}
+tolerations: []

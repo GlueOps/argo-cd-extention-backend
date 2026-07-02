@@ -1,0 +1,40 @@
+{{- if .Values.networkPolicy.enabled }}
+# -----------------------------------------------------------------------------
+# Only the Argo CD server may reach this backend. argocd-server performs the
+# `extensions, invoke` RBAC check before proxying, so this (plus the
+# Argocd-Application-Name header check in the app) makes the proxy reachable
+# only through the authenticated extension path -- not by arbitrary pods.
+#
+# PRE-APPLY CHECKS (cluster-specific):
+#   1. Confirm values.networkPolicy.argocdServerPodSelector /
+#      argocdServerNamespaceSelector match your Argo CD install (default
+#      pod selector: app.kubernetes.io/name: argocd-server, any namespace).
+#   2. If your CNI enforces NetworkPolicy on kubelet health probes, add an
+#      ipBlock rule for the node CIDR(s) so the startup/readiness/liveness
+#      probes on port {{ .Values.service.port }} are not blocked. Many CNIs
+#      (e.g. Cilium) exempt these by default.
+# -----------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "argocd-extension-backend-api.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argocd-extension-backend-api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "argocd-extension-backend-api.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.argocdServerNamespaceSelector | nindent 12 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.argocdServerPodSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+{{- end }}

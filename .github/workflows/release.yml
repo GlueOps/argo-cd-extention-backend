@@ -4,21 +4,35 @@ on:
   release:
     types: [created]
 
+# Least privilege: only what publishing an image + attaching scan/SBOM needs.
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
-  build-and-release:
+  test:
     runs-on: ubuntu-latest
     steps:
+      # NOTE: actions are on version tags for readability; Dependabot (see
+      # .github/dependabot.yml) is configured to pin these to commit SHAs.
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          # Match the runtime image (node:20-alpine).
+          node-version: '20'
+          cache: 'npm'
 
-      - run: npm install
+      # Reproducible install; falls back to `npm install` until a lockfile is committed.
+      - run: npm ci || npm install
+
+      - run: npm test
+
+  build-and-release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -31,11 +45,25 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push backend image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
+          # Supply-chain attestations: SBOM + build provenance.
+          sbom: true
+          provenance: mode=max
           tags: |
             ghcr.io/glueops/argocd-extension-backend-api:${{ github.event.release.tag_name }}
             ghcr.io/glueops/argocd-extension-backend-api:latest
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ghcr.io/glueops/argocd-extension-backend-api:${{ github.event.release.tag_name }}
+          format: 'table'
+          # Fail the release on fixable critical CVEs.
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL'
