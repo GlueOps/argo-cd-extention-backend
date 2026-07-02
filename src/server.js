@@ -707,6 +707,14 @@ function buildUrl(base, path, query) {
   if (upstream.origin !== baseUrl.origin) {
     throw new Error(`buildUrl: resolved origin ${upstream.origin} differs from base ${baseUrl.origin}`);
   }
+  // Defense in depth: a relative path with `..` segments resolves within the same
+  // origin but can climb above the base *path* prefix (e.g.
+  // `new URL('../api', 'https://h/prometheus/')` -> `https://h/api`), bypassing a
+  // base path used for isolation. Require the resolved pathname to stay under the
+  // base pathname.
+  if (upstream.pathname !== baseUrl.pathname && !upstream.pathname.startsWith(baseUrl.pathname)) {
+    throw new Error(`buildUrl: resolved path ${upstream.pathname} escapes base path ${baseUrl.pathname}`);
+  }
   upstream.search = buildQueryString(query);
   return upstream.toString();
 }

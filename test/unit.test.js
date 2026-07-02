@@ -43,6 +43,19 @@ test('buildUrl neutralizes host-changing paths (SSRF defense)', () => {
   assert.ok(out.startsWith('http://prom:9090/'), `expected same host, got ${out}`);
 });
 
+test('buildUrl rejects `..` paths that escape the base path prefix', () => {
+  // Same origin, but `..` climbs above the `/prometheus` isolation prefix.
+  assert.throws(
+    () => buildUrl('http://prom:9090/prometheus', '../api/v1/query', { query: 'up' }),
+    /escapes base path/
+  );
+  // A path that stays under the prefix is still allowed.
+  assert.equal(
+    buildUrl('http://prom:9090/prometheus', 'api/../api/v1/query', { query: 'up' }),
+    'http://prom:9090/prometheus/api/v1/query?query=up'
+  );
+});
+
 test('isRemoteCluster: local vs remote destinations', () => {
   assert.equal(isRemoteCluster({}), false);
   assert.equal(isRemoteCluster({ name: 'in-cluster' }), false);
