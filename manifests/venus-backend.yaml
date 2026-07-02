@@ -247,7 +247,12 @@ spec:
     #      ipBlock rule for the node CIDR(s) so readiness/liveness probes on
     #      port 8000 are not blocked. Many CNIs (e.g. Cilium) exempt these.
     - from:
-        - namespaceSelector: {}
+        # Restrict to argocd-server pods *in the argocd namespace*. A bare
+        # `namespaceSelector: {}` would admit any pod carrying the argocd-server
+        # label in ANY namespace (trivially spoofable), defeating the policy.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argocd
           podSelector:
             matchLabels:
               app.kubernetes.io/name: argocd-server

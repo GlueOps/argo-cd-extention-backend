@@ -72,6 +72,16 @@ test('prometheus proxy requires the Argo CD app-context header', async () => {
   assert.equal((await res.json()).errorType, 'unauthenticated');
 });
 
+test('prometheus proxy rejects a malformed app-context header (empty namespace)', async () => {
+  // ":app" has an empty namespace and must not slip past the app-context gate
+  // (would bypass the namespace allowlist when ALLOWED_NAMESPACES='*').
+  const res = await fetch(`${base}/api/datasources/proxy/prometheus/api/v1/query?query=up`, {
+    headers: { 'Argocd-Application-Name': ':app' }
+  });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).errorType, 'unauthenticated');
+});
+
 test('prometheus proxy returns config_error when no upstream is configured', async () => {
   const res = await fetch(`${base}/api/datasources/proxy/prometheus/api/v1/query?query=up`, {
     headers: { 'Argocd-Application-Name': 'default:app' }

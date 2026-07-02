@@ -135,4 +135,3 @@ Common causes:
   or RBAC is missing; fix RBAC or confirm the Application exists.
 - Ensure base URLs are `http(s)` and don't rely on trailing slashes (stripped
   automatically).
-```

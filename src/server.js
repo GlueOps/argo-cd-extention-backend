@@ -202,7 +202,10 @@ function extractAppConfigPath(pathValue) {
   const parts = pathValue.split('/').filter(Boolean);
   if (parts.length === 0) return pathValue;
   const last = parts[parts.length - 1];
-  const isFile = /\.[A-Za-z0-9]+$/.test(last);
+  // Only treat known config-file extensions as files, so dotted *directory*
+  // names (e.g. "apps/v2.1", "billing.internal") aren't mistaken for a file and
+  // stripped to a too-shallow directory. Mirrors buildGitTreeUrl's guard.
+  const isFile = /\.(ya?ml|json|tpl|txt|md|toml|ini|conf|cfg|env|properties)$/i.test(last);
   const dirParts = isFile ? parts.slice(0, -1) : parts;
   return dirParts.length > 0 ? dirParts.join('/') : pathValue;
 }
@@ -368,17 +371,21 @@ async function fetchText(url, headers) {
 async function readConfigRepoFileText(repoUrl, revision, relativePath) {
   if (CONFIG_REPO_LOCAL_ROOT && normalizeGitRepoUrl(repoUrl) === normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) {
     // relativePath originates from the Application spec's valueFiles; a "../" in it
-    // must not be able to read files outside the configured local root.
-    const root = path.resolve(CONFIG_REPO_LOCAL_ROOT);
-    const resolved = path.resolve(root, relativePath);
-    if (resolved === root || resolved.startsWith(root + path.sep)) {
-      try {
+    // must not be able to read files outside the configured local root. A lexical
+    // prefix check alone is insufficient: a symlink *inside* the root can point
+    // outside it (e.g. at a ServiceAccount token) and fs.readFile would follow it.
+    // Resolve real paths (following symlinks) before the containment check.
+    try {
+      const root = await fs.realpath(path.resolve(CONFIG_REPO_LOCAL_ROOT));
+      const resolved = await fs.realpath(path.resolve(root, relativePath));
+      if (resolved === root || resolved.startsWith(root + path.sep)) {
         return await fs.readFile(resolved, 'utf8');
-      } catch (err) {
-        logDebug('local config repo read failed', { relativePath, message: err.message });
       }
-    } else {
       logDebug('local config repo path escapes root; skipping', { relativePath });
+    } catch (err) {
+      // ENOENT (missing file/root) or a broken symlink lands here; fall through
+      // to the remote read rather than treating it as an escape.
+      logDebug('local config repo read failed', { relativePath, message: err.message });
     }
   }
 
@@ -719,26 +726,41 @@ function buildUrl(base, path, query) {
   return upstream.toString();
 }
 
+// Parse the Argo CD proxy-injected app-context header. Returns
+// { namespace, appName } only when it is well-formed `namespace:appName` with
+// both parts non-empty (after trimming); otherwise null. A bare `:`, `:app`, or
+// `ns:` is rejected so a malformed header cannot slip past the namespace
+// allowlist when ALLOWED_NAMESPACES='*'. Splits on the first colon only, since
+// Kubernetes namespace/object names never contain one.
+function parseAppContextHeader(headerValue) {
+  if (typeof headerValue !== 'string') return null;
+  const idx = headerValue.indexOf(':');
+  if (idx <= 0) return null;
+  const namespace = headerValue.slice(0, idx).trim();
+  const appName = headerValue.slice(idx + 1).trim();
+  if (!namespace || !appName) return null;
+  return { namespace, appName };
+}
+
 // Require the Argo CD proxy-injected app-context header on data-plane proxy
 // routes. The argocd-server extension proxy sets this only after enforcing the
 // user's `extensions, invoke` RBAC, so its presence is our signal that the
 // request arrived through that authenticated path rather than direct in-cluster
 // access. Pair with a NetworkPolicy restricting ingress to argocd-server.
 function requireArgoAppContext(req, res, next) {
-  const appNameHeader = req.get('Argocd-Application-Name') || '';
-  if (!appNameHeader || !appNameHeader.includes(':')) {
+  const ctx = parseAppContextHeader(req.get('Argocd-Application-Name') || '');
+  if (!ctx) {
     return res.status(401).json({
       status: 'error',
       errorType: 'unauthenticated',
-      error: 'missing Argocd-Application-Name header; requests must arrive via the Argo CD extension proxy'
+      error: 'missing or malformed Argocd-Application-Name header (expected namespace:appName); requests must arrive via the Argo CD extension proxy'
     });
   }
-  const namespace = appNameHeader.split(':', 1)[0];
-  if (!isNamespaceAllowed(namespace)) {
+  if (!isNamespaceAllowed(ctx.namespace)) {
     return res.status(403).json({
       status: 'error',
       errorType: 'forbidden',
-      error: `Namespace ${namespace} is not allowed`
+      error: `Namespace ${ctx.namespace} is not allowed`
     });
   }
   return next();
@@ -800,10 +822,10 @@ app.get('/api/links', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.set('Vary', 'Argocd-Application-Name');
 
-  const appNameHeader = req.get('Argocd-Application-Name') || '';
   const projectName = req.get('Argocd-Project-Name') || '';
 
-  if (!appNameHeader || !appNameHeader.includes(':')) {
+  const appContext = parseAppContextHeader(req.get('Argocd-Application-Name') || '');
+  if (!appContext) {
     return res.status(400).json({
       status: 'error',
       errorType: 'invalid_request',
@@ -811,7 +833,7 @@ app.get('/api/links', async (req, res) => {
     });
   }
 
-  const [namespace, appName] = appNameHeader.split(':', 2);
+  const { namespace, appName } = appContext;
 
   if (!isNamespaceAllowed(namespace)) {
     return res.status(403).json({
@@ -1075,6 +1097,7 @@ module.exports = {
   buildUrl,
   buildQueryString,
   requireArgoAppContext,
+  parseAppContextHeader,
   isNamespaceAllowed,
   isRemoteCluster,
   metadataMatchesApp,

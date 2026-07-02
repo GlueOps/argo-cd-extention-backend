@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const {
   buildUrl,
   buildQueryString,
+  parseAppContextHeader,
   isRemoteCluster,
   metadataMatchesApp,
   workloadsFromAppStatus,
@@ -54,6 +55,30 @@ test('buildUrl rejects `..` paths that escape the base path prefix', () => {
     buildUrl('http://prom:9090/prometheus', 'api/../api/v1/query', { query: 'up' }),
     'http://prom:9090/prometheus/api/v1/query?query=up'
   );
+});
+
+test('parseAppContextHeader requires non-empty namespace AND appName', () => {
+  assert.deepEqual(parseAppContextHeader('default:myapp'), { namespace: 'default', appName: 'myapp' });
+  // Trims surrounding whitespace.
+  assert.deepEqual(parseAppContextHeader('  ns : app '), { namespace: 'ns', appName: 'app' });
+  // First colon only; k8s names never contain ':'.
+  assert.deepEqual(parseAppContextHeader('ns:a:b'), { namespace: 'ns', appName: 'a:b' });
+  // Malformed forms that previously slipped past `includes(':')` -> null.
+  assert.equal(parseAppContextHeader(':app'), null);
+  assert.equal(parseAppContextHeader('ns:'), null);
+  assert.equal(parseAppContextHeader(':'), null);
+  assert.equal(parseAppContextHeader('noconlon'), null);
+  assert.equal(parseAppContextHeader(''), null);
+  assert.equal(parseAppContextHeader(undefined), null);
+});
+
+test('extractAppConfigPath treats dotted directory names as directories, not files', () => {
+  // Regression: "v2.1" must not be mistaken for a file and stripped to "apps".
+  assert.equal(extractAppConfigPath('apps/v2.1'), 'apps/v2.1');
+  assert.equal(extractAppConfigPath('apps/billing.internal'), 'apps/billing.internal');
+  // Real value files (known extensions) still resolve to their directory.
+  assert.equal(extractAppConfigPath('apps/foo/values.yaml'), 'apps/foo');
+  assert.equal(extractAppConfigPath('apps/foo'), 'apps/foo');
 });
 
 test('isRemoteCluster: local vs remote destinations', () => {

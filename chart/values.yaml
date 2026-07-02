@@ -102,7 +102,13 @@ networkPolicy:
   # Restrict ingress to only the argocd-server pod(s). Requires the CNI to
   # enforce NetworkPolicy (see templates/networkpolicy.yaml comments).
   enabled: true
-  argocdServerNamespaceSelector: {}
+  # Restrict to the namespace argocd-server runs in. A bare `{}` here admits any
+  # pod carrying the argocdServerPodSelector label in ANY namespace (trivially
+  # spoofable), which defeats the policy. Override if your Argo CD lives
+  # elsewhere. Requires k8s >= 1.21 for the immutable kubernetes.io/metadata.name
+  # namespace label.
+  argocdServerNamespaceSelector:
+    kubernetes.io/metadata.name: argocd
   argocdServerPodSelector:
     app.kubernetes.io/name: argocd-server
 
