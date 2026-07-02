@@ -76,3 +76,36 @@ spec:
       port: 8000
       targetPort: http
       protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argocd-extension-backend-api
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-extension-backend-api
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the Argo CD server may reach this backend. argocd-server performs the
+    # `extensions, invoke` RBAC check before proxying, so this (plus the
+    # Argocd-Application-Name header check in the app) makes the proxy reachable
+    # only through the authenticated extension path -- not by arbitrary pods.
+    #
+    # PRE-APPLY CHECKS (cluster-specific):
+    #   1. Confirm the argocd-server pod label below matches your install.
+    #   2. If your CNI enforces NetworkPolicy on kubelet health probes, add an
+    #      ipBlock rule for the node CIDR(s) so readiness/liveness probes on
+    #      port 8000 are not blocked. Many CNIs (e.g. Cilium) exempt these.
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: argocd-server
+      ports:
+        - protocol: TCP
+          port: 8000
