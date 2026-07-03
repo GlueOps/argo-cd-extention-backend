@@ -30,7 +30,8 @@ spec:
   ingress:
     - from:
         - namespaceSelector:
-            {{- toYaml .Values.networkPolicy.argocdServerNamespaceSelector | nindent 12 }}
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.argocdServerNamespaceSelector | nindent 14 }}
           podSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.argocdServerPodSelector | nindent 14 }}

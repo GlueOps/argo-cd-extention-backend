@@ -57,7 +57,7 @@ jobs:
             ghcr.io/glueops/argocd-extension-backend-api:latest
 
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
         with:
           image-ref: ghcr.io/glueops/argocd-extension-backend-api:${{ github.event.release.tag_name }}
           format: 'table'
