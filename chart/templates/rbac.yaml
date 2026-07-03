@@ -2,6 +2,10 @@
 {{- $fullname := include "argocd-extension-backend-api.fullname" . }}
 {{- $saName := include "argocd-extension-backend-api.serviceAccountName" . }}
 {{- $labels := include "argocd-extension-backend-api.labels" . }}
+{{- /* Workload/ExternalSecret reads happen in the DESTINATION namespace, so the
+       namespaced Roles below are created there. Follow allowedDestNamespaces when
+       set, otherwise allowedNamespaces (the single-list default). */ -}}
+{{- $rbacNamespaces := .Values.allowedDestNamespaces | default .Values.allowedNamespaces }}
 ---
 # -----------------------------------------------------------------------------
 # argoproj.io Applications: get + list, granted CLUSTER-WIDE (always).
@@ -41,7 +45,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ $saName }}
     namespace: {{ .Release.Namespace }}
-{{- if eq (.Values.allowedNamespaces | toString) "*" }}
+{{- if eq ($rbacNamespaces | toString) "*" }}
 ---
 # -----------------------------------------------------------------------------
 # CLUSTER-WIDE RBAC NOTE
@@ -85,7 +89,7 @@ subjects:
     name: {{ $saName }}
     namespace: {{ .Release.Namespace }}
 {{- else }}
-{{- range $ns := (.Values.allowedNamespaces | toString | splitList ",") }}
+{{- range $ns := ($rbacNamespaces | toString | splitList ",") }}
 {{- $ns := trim $ns }}
 {{- if $ns }}
 ---

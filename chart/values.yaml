@@ -55,6 +55,20 @@ service:
 # ---------------------------------------------------------------------------
 allowedNamespaces: "argocd"
 
+# Optional: split the single allowedNamespaces gate into its two independent axes.
+# Leave BOTH empty to inherit allowedNamespaces (backward compatible). Set them when
+# your Application CRs and their workloads live in different namespaces:
+#   - allowedAppNamespaces gates the Application-CR namespace (the
+#     Argocd-Application-Name header prefix). Keep this tight -- usually just the
+#     namespace(s) your Application CRs live in (e.g. "argocd").
+#   - allowedDestNamespaces gates spec.destination.namespace, where workloads run
+#     and where this backend actually LISTS Deployments/ExternalSecrets. When set,
+#     the RBAC in templates/rbac.yaml follows THIS list instead of allowedNamespaces
+#     (that's where the reads happen), so point it at the tenant destination
+#     namespaces you serve.
+allowedAppNamespaces: ""
+allowedDestNamespaces: ""
+
 env:
   logLevel: "INFO" # INFO | DEBUG
   requestTimeoutMs: "8000"

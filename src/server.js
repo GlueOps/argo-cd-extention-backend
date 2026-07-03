@@ -848,7 +848,7 @@ app.get('/api/links', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.set('Vary', 'Argocd-Application-Name');
 
-  const projectName = req.get('Argocd-Project-Name') || '';
+  const projectName = (req.get('Argocd-Project-Name') || '').trim();
 
   const appContext = parseAppContextHeader(req.get('Argocd-Application-Name') || '');
   if (!appContext) {
