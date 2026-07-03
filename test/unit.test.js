@@ -16,7 +16,8 @@ const {
   workloadsFromAppStatus,
   extractAppConfigPath,
   buildGitTreeUrl,
-  buildVaultSecretUrl
+  buildVaultSecretUrl,
+  isNamespaceAllowed
 } = require('../src/server');
 
 test('buildQueryString preserves multi-value params and drops non-scalars', () => {
@@ -79,6 +80,26 @@ test('extractAppConfigPath treats dotted directory names as directories, not fil
   // Real value files (known extensions) still resolve to their directory.
   assert.equal(extractAppConfigPath('apps/foo/values.yaml'), 'apps/foo');
   assert.equal(extractAppConfigPath('apps/foo'), 'apps/foo');
+});
+
+test('extractAppConfigPath recognizes jsonnet/cue/gotmpl/j2 value files', () => {
+  // Argo CD renders jsonnet/libsonnet/cue; helmfile/jinja use *.gotmpl / *.j2.
+  // These must resolve to the containing directory, not be treated as a dir name.
+  assert.equal(extractAppConfigPath('apps/foo/values.jsonnet'), 'apps/foo');
+  assert.equal(extractAppConfigPath('apps/foo/config.libsonnet'), 'apps/foo');
+  assert.equal(extractAppConfigPath('apps/foo/values.cue'), 'apps/foo');
+  assert.equal(extractAppConfigPath('apps/foo/values.yaml.gotmpl'), 'apps/foo');
+  assert.equal(extractAppConfigPath('apps/foo/values.yaml.j2'), 'apps/foo');
+});
+
+test('isNamespaceAllowed honors the default list, an explicit list, and wildcard', () => {
+  // Wildcard allows everything.
+  assert.equal(isNamespaceAllowed('anything', '*'), true);
+  // Explicit comma list (with whitespace) is trimmed and matched exactly.
+  assert.equal(isNamespaceAllowed('argocd', 'argocd, glueops-core'), true);
+  assert.equal(isNamespaceAllowed('team-a', 'argocd, glueops-core'), false);
+  // Default arg is ALLOWED_NAMESPACES ('*' in this test process's env).
+  assert.equal(isNamespaceAllowed('team-a'), true);
 });
 
 test('isRemoteCluster: local vs remote destinations', () => {

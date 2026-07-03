@@ -3,8 +3,9 @@
 #   helm install argocd-extension-backend-api chart/ -n argocd -f chart/values-argocd.yaml
 
 # Bounded to "argocd" instead of the old "*" -- see the RBAC warning in
-# templates/rbac.yaml for why unbounded "*" (cluster-wide secrets:list) is
-# avoided here.
+# templates/rbac.yaml for why unbounded "*" (which forces a cluster-wide
+# workload/ExternalSecret list Role) is avoided here. The app requests NO
+# secrets/pods RBAC at all.
 allowedNamespaces: "argocd"
 
 env:

@@ -13,12 +13,26 @@ reachable **only** through that proxy. Two controls enforce this and both must b
 in place:
 
 1. A `NetworkPolicy` restricting ingress to the `argocd-server` pod (shipped in the
-   Helm chart and raw manifests).
+   Helm chart and raw manifests). ⚠️ **A NetworkPolicy is only enforced if your CNI
+   enforces NetworkPolicies.** On clusters where it does not (e.g. stock flannel, or
+   EKS without the VPC CNI network-policy add-on / Calico), this control is silently
+   a no-op and *any* pod that can route to the Service can spoof the header. Confirm
+   enforcement, and scope `argocdServerNamespaceSelector` to the real Argo CD
+   namespace (the chart defaults to `kubernetes.io/metadata.name: argocd`).
 2. The app rejects requests without a well-formed app-context header (`401`), and
-   enforces `ALLOWED_NAMESPACES` on both the Application namespace and its
-   destination namespace.
+   enforces the namespace allowlist on both the Application namespace
+   (`ALLOWED_APP_NAMESPACES`) and its destination namespace
+   (`ALLOWED_DEST_NAMESPACES`) — each defaulting to `ALLOWED_NAMESPACES`.
 
 Do **not** expose this Service via an Ingress/LoadBalancer.
+
+> **Proxy scope:** the Prometheus/Tempo proxy routes forward the caller's query to
+> the upstream **verbatim and unscoped** — they are gated by the app-context header
+> (coarse `extensions, invoke` RBAC done by argocd-server) but do **not** restrict
+> results to the caller's namespace. Any user allowed to invoke the extension can
+> therefore read cluster-wide metrics/traces, as with a shared Grafana datasource.
+> Keep the upstream Prometheus/Tempo appropriately scoped if per-tenant isolation of
+> telemetry is required.
 
 ## Endpoints
 

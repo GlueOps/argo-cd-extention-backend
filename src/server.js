@@ -56,6 +56,14 @@ const CONFIG_REPO_LOCAL_ROOT = (process.env.CONFIG_REPO_LOCAL_ROOT || '').trim()
 const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
 const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES || '*').trim();
+// ALLOWED_NAMESPACES gates two DIFFERENT axes of Argo's model: the namespace the
+// Application CR lives in (the header prefix) and the Application's destination
+// namespace where workloads actually run. These are frequently not the same — an
+// app CR in `argocd` can deploy to a per-tenant destination namespace — so enforcing
+// one list against both 403s legitimate apps. Split them: each axis defaults to
+// ALLOWED_NAMESPACES (backward compatible) but can be overridden independently.
+const ALLOWED_APP_NAMESPACES = (process.env.ALLOWED_APP_NAMESPACES || ALLOWED_NAMESPACES).trim();
+const ALLOWED_DEST_NAMESPACES = (process.env.ALLOWED_DEST_NAMESPACES || ALLOWED_NAMESPACES).trim();
 
 // Grafana dashboard paths ("<uid>" or "<uid>/<slug>"). Defaults match the GlueOps
 // platform dashboards; override per-cluster instead of hardcoding inline.
@@ -84,7 +92,7 @@ if (DEPLOYMENT_CONFIG_REPO_URL && !/^https?:\/\//.test(DEPLOYMENT_CONFIG_REPO_UR
   process.exit(1);
 }
 
-console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)} ALLOWED_NAMESPACES=${JSON.stringify(ALLOWED_NAMESPACES)}`);
+console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)} ALLOWED_APP_NAMESPACES=${JSON.stringify(ALLOWED_APP_NAMESPACES)} ALLOWED_DEST_NAMESPACES=${JSON.stringify(ALLOWED_DEST_NAMESPACES)}`);
 
 function logDebug(message, meta) {
   if (LOG_LEVEL === 'DEBUG') {
@@ -122,9 +130,9 @@ function withTimeout(promise, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function isNamespaceAllowed(namespace) {
-  if (ALLOWED_NAMESPACES === '*') return true;
-  const allowedList = ALLOWED_NAMESPACES.split(',').map((s) => s.trim()).filter(Boolean);
+function isNamespaceAllowed(namespace, allowList = ALLOWED_NAMESPACES) {
+  if (allowList === '*') return true;
+  const allowedList = allowList.split(',').map((s) => s.trim()).filter(Boolean);
   return allowedList.includes(namespace);
 }
 
@@ -162,6 +170,14 @@ function encodePathSegments(pathValue) {
     .join('/');
 }
 
+// Extensions we treat as config *files* (as opposed to dotted directory names
+// like "apps/v2.1"). Beyond plain manifests this includes the config/templating
+// languages Argo CD actually renders — jsonnet/libsonnet/cue — and helmfile/jinja
+// templates (*.gotmpl, *.j2), so a real value file isn't misclassified as a
+// directory and linked at the wrong depth. Shared by buildGitTreeUrl and
+// extractAppConfigPath so the two never drift apart.
+const CONFIG_FILE_EXT_RE = /\.(ya?ml|json|jsonnet|libsonnet|cue|gotmpl|j2|tpl|txt|md|toml|ini|conf|cfg|env|properties)$/i;
+
 function buildGitTreeUrl(repoUrl, revision, relativePath) {
   if (typeof repoUrl !== 'string' || repoUrl.trim() === '') return '';
   if (typeof revision !== 'string' || revision.trim() === '') return '';
@@ -173,7 +189,7 @@ function buildGitTreeUrl(repoUrl, revision, relativePath) {
   const lastSegment = relativePath.trim().split('/').filter(Boolean).pop() || '';
   // Only treat known config file extensions as files, so dotted *directory* names
   // (e.g. "v2.1", "billing.internal") aren't mistaken for files and linked as blobs.
-  const isLikelyFile = /\.(ya?ml|json|tpl|txt|md|toml|ini|conf|cfg|env|properties)$/i.test(lastSegment);
+  const isLikelyFile = CONFIG_FILE_EXT_RE.test(lastSegment);
   const mode = isLikelyFile ? 'blob' : 'tree';
   return `${base}/${mode}/${encodedRevision}/${encodedPath}`;
 }
@@ -205,7 +221,7 @@ function extractAppConfigPath(pathValue) {
   // Only treat known config-file extensions as files, so dotted *directory*
   // names (e.g. "apps/v2.1", "billing.internal") aren't mistaken for a file and
   // stripped to a too-shallow directory. Mirrors buildGitTreeUrl's guard.
-  const isFile = /\.(ya?ml|json|tpl|txt|md|toml|ini|conf|cfg|env|properties)$/i.test(last);
+  const isFile = CONFIG_FILE_EXT_RE.test(last);
   const dirParts = isFile ? parts.slice(0, -1) : parts;
   return dirParts.length > 0 ? dirParts.join('/') : pathValue;
 }
@@ -513,19 +529,29 @@ async function getArgoApplication(namespace, appName) {
     if (ns && !candidateNamespaces.includes(ns)) candidateNamespaces.push(ns);
   });
 
-  for (const ns of candidateNamespaces) {
-    try {
-      const response = await withTimeout(
+  // Query the candidate namespaces CONCURRENTLY. Done sequentially, a wedged
+  // apiserver would stack REQUEST_TIMEOUT_MS once per namespace (plus the cluster
+  // fallback below), so /api/links could hang for ~N× the timeout — exactly what
+  // withTimeout is meant to prevent. Running them in parallel bounds the namespaced
+  // phase to a single timeout. Priority is preserved: `candidateNamespaces` is
+  // ordered [requestedNs, ...fallbacks], so the first non-null result in array order
+  // is the requested namespace's Application when it exists.
+  const namespacedResults = await Promise.all(
+    candidateNamespaces.map(ns =>
+      withTimeout(
         k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', ns, 'applications', normalizedAppName),
         `getArgoApplication(${ns})`
-      );
-      if (response && response.body && typeof response.body === 'object') {
-        return response.body;
-      }
-    } catch (err) {
-      logDebug('getArgoApplication namespaced lookup failed', { namespace: ns, message: err.message });
-    }
-  }
+      ).then(
+        response => (response && response.body && typeof response.body === 'object' ? response.body : null),
+        err => {
+          logDebug('getArgoApplication namespaced lookup failed', { namespace: ns, message: err.message });
+          return null;
+        }
+      )
+    )
+  );
+  const matched = namespacedResults.find(body => body);
+  if (matched) return matched;
 
   try {
     const response = await withTimeout(
@@ -756,7 +782,7 @@ function requireArgoAppContext(req, res, next) {
       error: 'missing or malformed Argocd-Application-Name header (expected namespace:appName); requests must arrive via the Argo CD extension proxy'
     });
   }
-  if (!isNamespaceAllowed(ctx.namespace)) {
+  if (!isNamespaceAllowed(ctx.namespace, ALLOWED_APP_NAMESPACES)) {
     return res.status(403).json({
       status: 'error',
       errorType: 'forbidden',
@@ -835,7 +861,7 @@ app.get('/api/links', async (req, res) => {
 
   const { namespace, appName } = appContext;
 
-  if (!isNamespaceAllowed(namespace)) {
+  if (!isNamespaceAllowed(namespace, ALLOWED_APP_NAMESPACES)) {
     return res.status(403).json({
       status: 'error',
       errorType: 'forbidden',
@@ -850,12 +876,19 @@ app.get('/api/links', async (req, res) => {
 
   // Defense in depth: if Argo CD supplied the project, it must match the resolved
   // Application. A mismatch signals a stale/forged header or a misrouted request.
-  if (appObj && projectName && typeof appSpec.project === 'string' && appSpec.project !== projectName) {
-    return res.status(403).json({
-      status: 'error',
-      errorType: 'forbidden',
-      error: 'Argocd-Project-Name does not match the resolved application project'
-    });
+  // argocd-server sends spec.GetProject(), which returns "default" for an unset or
+  // empty project, so normalize the stored value the same way before comparing —
+  // otherwise an Application persisted with spec.project: "" (or absent) would 403
+  // spuriously against the header's "default".
+  if (appObj && projectName) {
+    const appProject = asNonEmptyString(appSpec.project) || 'default';
+    if (appProject !== projectName) {
+      return res.status(403).json({
+        status: 'error',
+        errorType: 'forbidden',
+        error: 'Argocd-Project-Name does not match the resolved application project'
+      });
+    }
   }
 
   const destination = appSpec.destination && typeof appSpec.destination === 'object' ? appSpec.destination : {};
@@ -865,7 +898,7 @@ app.get('/api/links', async (req, res) => {
 
   // Also gate the namespace we actually read from: destination can differ from the
   // Application's own namespace and point at something not intended to be exposed.
-  if (!isNamespaceAllowed(destinationNamespace)) {
+  if (!isNamespaceAllowed(destinationNamespace, ALLOWED_DEST_NAMESPACES)) {
     return res.status(403).json({
       status: 'error',
       errorType: 'forbidden',
@@ -1016,10 +1049,14 @@ app.get('/api/datasources/proxy/prometheus/api/v1/query', requireArgoAppContext,
 
     return res.status(200).json(result.payload || { status: 'success', data: { resultType: 'vector', result: [] } });
   } catch (err) {
+    // Don't echo err.message to the client: for a fetch failure it can include the
+    // upstream host (getaddrinfo ENOTFOUND <host>) and for buildUrl the internal
+    // base origin/path — leaking internal topology. Log server-side, return generic.
+    console.error('[ERROR] prometheus proxy failed:', err.message);
     return res.status(502).json({
       status: 'error',
       errorType: 'proxy_error',
-      error: err.message
+      error: 'failed to reach the Prometheus upstream'
     });
   }
 });
@@ -1055,10 +1092,13 @@ app.get('/api/datasources/proxy/tempo/api/search', requireArgoAppContext, async 
 
     return res.status(200).json({ traces: [] });
   } catch (err) {
+    // See the Prometheus proxy handler: keep upstream host/path out of the client
+    // response to avoid leaking internal topology; log the detail server-side.
+    console.error('[ERROR] tempo proxy failed:', err.message);
     return res.status(502).json({
       status: 'error',
       errorType: 'proxy_error',
-      error: err.message,
+      error: 'failed to reach the Tempo upstream',
       traces: []
     });
   }

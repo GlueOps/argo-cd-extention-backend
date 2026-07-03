@@ -63,8 +63,23 @@ The allow-list is enforced on **both** the Application's namespace and its
 `spec.destination.namespace` (they can differ). A disallowed namespace returns
 `403`. The proxy endpoints also require the app-context header (`401` without it).
 
-> ⚠️ `ALLOWED_NAMESPACES=*` combined with cluster-wide RBAC lets any request scope the
-> backend at every namespace. On shared/multi-tenant clusters, set a bounded list.
+**Splitting the two axes.** The Application CR often lives in a small fixed set of
+namespaces (`argocd`, `glueops-core`) while its workloads run in per-tenant
+`spec.destination.namespace`s. Enforcing one list against both would `403` every app
+whose destination differs from its CR namespace. Override each axis independently:
+
+| Env | Gates | Default |
+| --- | --- | --- |
+| `ALLOWED_APP_NAMESPACES` | the Application-CR namespace (header prefix) | `ALLOWED_NAMESPACES` |
+| `ALLOWED_DEST_NAMESPACES` | `spec.destination.namespace` (where reads happen) | `ALLOWED_NAMESPACES` |
+
+If you only set `ALLOWED_NAMESPACES`, both axes use it (backward compatible). A typical
+bounded config: `ALLOWED_APP_NAMESPACES=argocd` plus `ALLOWED_DEST_NAMESPACES` listing
+the tenant destination namespaces (which must also appear in the RBAC scope, below).
+
+> ⚠️ `ALLOWED_NAMESPACES=*` (or a wildcard on either axis) combined with cluster-wide
+> RBAC lets any request scope the backend at every namespace. On shared/multi-tenant
+> clusters, set bounded lists.
 
 ## Kubernetes RBAC
 

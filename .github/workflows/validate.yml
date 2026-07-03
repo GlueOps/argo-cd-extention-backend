@@ -1,0 +1,66 @@
+name: Validate chart and manifests
+
+# Schema-validates the Helm chart (rendered) and the raw manifests on every PR.
+# This exists because `helm lint` and `helm template` do NOT validate against the
+# Kubernetes schema -- an invalid spec (e.g. a NetworkPolicy `namespaceSelector`
+# missing its `matchLabels:` wrapper) renders and lints cleanly but is rejected by
+# the API server. `kubeconform -strict` catches that statically, with no cluster.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Pin tool versions for reproducibility.
+  HELM_VERSION: v3.16.2
+  KUBECONFORM_VERSION: v0.8.0
+  # kubeconform validates against schemas for this k8s minor.
+  KUBE_VERSION: "1.30.0"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install kubeconform
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: helm lint (all value files)
+        run: |
+          helm lint ./chart
+          helm lint ./chart -f ./chart/values-argocd.yaml
+          helm lint ./chart -f ./chart/values-venus.yaml
+
+      # Render the chart with each environment's values and schema-validate the
+      # output. -strict rejects unknown/misplaced fields (the LabelSelector bug);
+      # -ignore-missing-schemas skips CRDs (Application/ExternalSecret) that have no
+      # published schema rather than failing on them.
+      - name: Validate rendered chart
+        run: |
+          set -euo pipefail
+          for values in values.yaml values-argocd.yaml values-venus.yaml; do
+            echo "== rendering chart with $values =="
+            helm template release ./chart -f "./chart/$values" \
+              | kubeconform -strict -summary -verbose \
+                  -kubernetes-version "${KUBE_VERSION}" \
+                  -ignore-missing-schemas
+          done
+
+      - name: Validate raw manifests
+        run: |
+          kubeconform -strict -summary -verbose \
+            -kubernetes-version "${KUBE_VERSION}" \
+            -ignore-missing-schemas \
+            manifests/argocd-backend.yaml manifests/venus-backend.yaml
