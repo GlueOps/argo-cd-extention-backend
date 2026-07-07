@@ -85,17 +85,23 @@ the tenant destination namespaces (which must also appear in the RBAC scope, bel
 
 The pod uses its in-cluster ServiceAccount. Required verbs (read-only):
 
-| API group | Resource | Verbs |
-| --- | --- | --- |
-| `argoproj.io` | `applications` | `get`, `list` |
-| `external-secrets.io` | `externalsecrets` | `list` |
-| `apps` | `deployments`, `statefulsets`, `daemonsets` | `list` |
+| API group | Resource | Verbs | Scope |
+| --- | --- | --- | --- |
+| `argoproj.io` | `applications` | `get`, `list` | **cluster-wide (always)** |
+| `external-secrets.io` | `externalsecrets` | `list` | namespaced when `allowedNamespaces` is bounded, else cluster-wide |
+| `apps` | `deployments`, `statefulsets`, `daemonsets` | `list` | namespaced when `allowedNamespaces` is bounded, else cluster-wide |
 
 The backend intentionally does **not** need `secrets` or `pods` permissions.
-Prefer namespaced `Role`/`RoleBinding` in the allowed namespaces over a `ClusterRole`
-whenever `ALLOWED_NAMESPACES` is bounded. The Helm chart generates namespaced Roles
-automatically when `allowedNamespaces` is a bounded list, and a `ClusterRole` only
-when it is `*`.
+
+> ⚠️ **`applications` get/list is always granted cluster-wide**, even when
+> `allowedNamespaces` is bounded. `getArgoApplication()` falls back to a
+> cluster-wide `list` of Applications, which a namespaced `Role` cannot authorize.
+> This means a bounded instance can still enumerate every tenant's Application
+> spec (source repo, revision, destination, project) — not secret material, but
+> more than the per-namespace "least privilege" the workload/ExternalSecret Roles
+> achieve. The remaining verbs *are* scoped to a namespaced `Role`/`RoleBinding`
+> when `allowedNamespaces` is a bounded list; only `*` makes them cluster-wide too.
+> The Helm chart applies this split automatically.
 
 ## Workload discovery & degraded responses
 

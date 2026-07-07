@@ -11,6 +11,14 @@ const app = express();
 // faithfully forward multi-value query params to upstream.
 app.set('query parser', 'simple');
 
+// Express 4 does NOT forward a rejected promise from an async route handler to
+// error-handling middleware — an uncaught rejection just leaves the response
+// unsent and hangs the client. Wrap async handlers so any rejection is routed to
+// the central error boundary (registered at the bottom) as a clean 500.
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
 function requirePositiveInt(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -118,7 +126,15 @@ try {
 
 // The @kubernetes/client-node calls used below have no built-in timeout, so a
 // wedged apiserver could make /api/links hang far past REQUEST_TIMEOUT_MS. Wrap
-// each call so it fails fast and degrades gracefully instead.
+// each call so the CALLER fails fast and degrades gracefully instead.
+//
+// NOTE: this bounds latency, not resource usage. @kubernetes/client-node@0.22's
+// request-based methods take no AbortSignal, so the underlying HTTP request keeps
+// running until it (or its own socket timeout) completes — Promise.race only stops
+// us waiting on it. Under sustained apiserver slowness, in-flight requests can
+// accumulate. Acceptable for this low-traffic utility; revisit (thread an
+// AbortSignal into the k8s calls) if the client is upgraded to a version that
+// supports cancellation.
 function withTimeout(promise, label) {
   let timer;
   const timeout = new Promise((_resolve, reject) => {
@@ -517,6 +533,19 @@ function buildConfigRepoLinks(appObj) {
   return [{ label: `Config (${direct.path})`, url }];
 }
 
+// From a list of Application objects (as returned by per-namespace GETs), pick the
+// one that actually belongs to `namespace`. Rejecting a mismatched namespace is what
+// prevents a same-named Application in a fallback namespace from being served to a
+// caller scoped to a different namespace. Pure + exported so the isolation rule is
+// unit-testable without a live cluster.
+function selectApplicationForNamespace(bodies, namespace) {
+  if (!Array.isArray(bodies)) return null;
+  return bodies.find(body =>
+    body && body.metadata && typeof body.metadata === 'object' &&
+    body.metadata.namespace === namespace
+  ) || null;
+}
+
 async function getArgoApplication(namespace, appName) {
   if (!k8sCustomObjectsApi) return null;
   const normalizedNamespace = asNonEmptyString(namespace);
@@ -533,9 +562,7 @@ async function getArgoApplication(namespace, appName) {
   // apiserver would stack REQUEST_TIMEOUT_MS once per namespace (plus the cluster
   // fallback below), so /api/links could hang for ~N× the timeout — exactly what
   // withTimeout is meant to prevent. Running them in parallel bounds the namespaced
-  // phase to a single timeout. Priority is preserved: `candidateNamespaces` is
-  // ordered [requestedNs, ...fallbacks], so the first non-null result in array order
-  // is the requested namespace's Application when it exists.
+  // phase to a single timeout.
   const namespacedResults = await Promise.all(
     candidateNamespaces.map(ns =>
       withTimeout(
@@ -550,7 +577,14 @@ async function getArgoApplication(namespace, appName) {
       )
     )
   );
-  const matched = namespacedResults.find(body => body);
+  // Accept ONLY a result whose metadata.namespace equals the requested namespace.
+  // The candidate list also probes ARGOCD_APP_NAMESPACES (e.g. argocd,glueops-core),
+  // so if the requested-namespace lookup transiently fails while a same-named
+  // Application exists in a fallback namespace, a bare "first non-null" pick would
+  // silently return a DIFFERENT tenant's Application — the exact cross-tenant leak
+  // the cluster-wide fallback below already guards against. Apply the same
+  // name+namespace check here so the two resolution paths can't diverge.
+  const matched = selectApplicationForNamespace(namespacedResults, normalizedNamespace);
   if (matched) return matched;
 
   try {
@@ -574,7 +608,13 @@ async function getArgoApplication(namespace, appName) {
   }
 }
 
-const WORKLOAD_KIND_TYPES = { Deployment: 'deployment', StatefulSet: 'statefulset', DaemonSet: 'daemonset' };
+// Argo CD tracking is kind-agnostic, so status.resources[] can also carry an Argo
+// Rollouts `Rollout` (common on GitOps platforms doing canary/blue-green). A Rollout
+// manages ReplicaSets/Pods much like a Deployment, so map it to the "deployment"
+// dashboard type — better a workload-scoped link than silently dropping it to the
+// app-name guess. (Live-listing in getAppResources still only covers apps/* kinds;
+// Rollouts are only picked up via the authoritative status.resources[] path.)
+const WORKLOAD_KIND_TYPES = { Deployment: 'deployment', StatefulSet: 'statefulset', DaemonSet: 'daemonset', Rollout: 'deployment' };
 
 // Argo CD records every resource it manages in status.resources[] — an authoritative,
 // tracking-based list. Prefer it over re-deriving workload membership by label guessing
@@ -841,7 +881,7 @@ app.get('/readyz', (_req, res) => {
   return res.json({ status: 'ok' });
 });
 
-app.get('/api/links', async (req, res) => {
+app.get('/api/links', asyncHandler(async (req, res) => {
   // This response is keyed by the Argocd-Application-Name request header and exposes
   // per-application data. Prevent any shared/browser/intermediary cache from reusing
   // one app's links for another (caches key on URL, not header, unless told via Vary).
@@ -1013,9 +1053,13 @@ app.get('/api/links', async (req, res) => {
       max_rows: 4
     }
   });
-});
+}));
 
 app.get('/api/datasources/proxy/prometheus/api/v1/query', requireArgoAppContext, async (req, res) => {
+  // This route is access-gated by the Argocd-Application-Name header, which is not
+  // part of the cache key; forbid shared/browser caches from serving a cached 200
+  // to a later request that skipped the gate.
+  res.set('Cache-Control', 'no-store');
   if (!PROMETHEUS_BASE_URL) {
     return res.status(503).json({
       status: 'error',
@@ -1053,6 +1097,15 @@ app.get('/api/datasources/proxy/prometheus/api/v1/query', requireArgoAppContext,
     // upstream host (getaddrinfo ENOTFOUND <host>) and for buildUrl the internal
     // base origin/path — leaking internal topology. Log server-side, return generic.
     console.error('[ERROR] prometheus proxy failed:', err.message);
+    // A timeout is "upstream is slow", distinct from "upstream is broken" — surface
+    // it as 504 so the UI/operator can tell them apart.
+    if (err && err.name === 'AbortError') {
+      return res.status(504).json({
+        status: 'error',
+        errorType: 'upstream_timeout',
+        error: 'the Prometheus upstream timed out'
+      });
+    }
     return res.status(502).json({
       status: 'error',
       errorType: 'proxy_error',
@@ -1062,6 +1115,8 @@ app.get('/api/datasources/proxy/prometheus/api/v1/query', requireArgoAppContext,
 });
 
 app.get('/api/datasources/proxy/tempo/api/search', requireArgoAppContext, async (req, res) => {
+  // See the Prometheus proxy: header-gated route, keep it out of shared caches.
+  res.set('Cache-Control', 'no-store');
   if (!TEMPO_BASE_URL) {
     return res.status(200).json({ traces: [] });
   }
@@ -1095,6 +1150,14 @@ app.get('/api/datasources/proxy/tempo/api/search', requireArgoAppContext, async 
     // See the Prometheus proxy handler: keep upstream host/path out of the client
     // response to avoid leaking internal topology; log the detail server-side.
     console.error('[ERROR] tempo proxy failed:', err.message);
+    if (err && err.name === 'AbortError') {
+      return res.status(504).json({
+        status: 'error',
+        errorType: 'upstream_timeout',
+        error: 'the Tempo upstream timed out',
+        traces: []
+      });
+    }
     return res.status(502).json({
       status: 'error',
       errorType: 'proxy_error',
@@ -1108,13 +1171,30 @@ app.use((_req, res) => {
   res.status(404).json({ status: 'error', errorType: 'not_found', error: 'Not found' });
 });
 
+// Central error boundary. Async handlers wrapped in asyncHandler forward their
+// rejections here (Express 4 will not do this on its own), so an unanticipated
+// throw — e.g. a k8s object of an unexpected shape reaching /api/links — becomes a
+// clean 500 envelope instead of a hung request or a crashed process. The detail is
+// logged server-side only; the client gets a generic message (no topology leak).
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
+  console.error('[ERROR] unhandled request error:', err && err.message);
+  if (res.headersSent) return;
+  res.status(500).json({ status: 'error', errorType: 'internal_error', error: 'internal server error' });
+});
+
 function start() {
   const server = app.listen(PORT, () => {
     console.log(`argocd-extension-backend-api listening on :${PORT}`);
   });
 
   // Drain in-flight requests on rollout/scale-down instead of dropping them.
+  let shuttingDown = false;
   function shutdown(signal) {
+    // kubelet normally sends a single SIGTERM, but guard against a second signal
+    // (or SIGINT+SIGTERM) re-closing an already-closing server and stacking timers.
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`[SHUTDOWN] received ${signal}, closing server`);
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), REQUEST_TIMEOUT_MS + 2000).unref();
@@ -1140,6 +1220,7 @@ module.exports = {
   parseAppContextHeader,
   isNamespaceAllowed,
   isRemoteCluster,
+  selectApplicationForNamespace,
   metadataMatchesApp,
   workloadsFromAppStatus,
   extractAppConfigPath,

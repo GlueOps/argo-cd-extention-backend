@@ -12,6 +12,7 @@ const {
   buildQueryString,
   parseAppContextHeader,
   isRemoteCluster,
+  selectApplicationForNamespace,
   metadataMatchesApp,
   workloadsFromAppStatus,
   extractAppConfigPath,
@@ -108,6 +109,30 @@ test('isRemoteCluster: local vs remote destinations', () => {
   assert.equal(isRemoteCluster({ name: 'prod-cluster' }), true);
   assert.equal(isRemoteCluster({ server: 'https://kubernetes.default.svc' }), false);
   assert.equal(isRemoteCluster({ server: 'https://10.0.0.1' }), true);
+});
+
+test('selectApplicationForNamespace only accepts an Application from the requested namespace', () => {
+  const requested = { metadata: { name: 'api', namespace: 'team-a' } };
+  const collision = { metadata: { name: 'api', namespace: 'argocd' } };
+
+  // Happy path: the requested-namespace Application is returned.
+  assert.equal(selectApplicationForNamespace([requested, collision], 'team-a'), requested);
+
+  // Cross-tenant guard: if the requested-namespace lookup failed (null) but a
+  // same-named Application exists in a fallback namespace, it must NOT be returned.
+  assert.equal(selectApplicationForNamespace([null, collision], 'team-a'), null);
+
+  // Robust against junk/empty inputs.
+  assert.equal(selectApplicationForNamespace([], 'team-a'), null);
+  assert.equal(selectApplicationForNamespace(null, 'team-a'), null);
+  assert.equal(selectApplicationForNamespace([{ metadata: null }], 'team-a'), null);
+});
+
+test('workloadsFromAppStatus maps an Argo Rollout to the deployment dashboard type', () => {
+  const appObj = { status: { resources: [{ kind: 'Rollout', name: 'api-canary', namespace: 'app-ns' }] } };
+  assert.deepEqual(workloadsFromAppStatus(appObj, 'default-ns'), [
+    { name: 'api-canary', type: 'deployment', namespace: 'app-ns' }
+  ]);
 });
 
 test('metadataMatchesApp trusts instance labels/name but NOT the bare app label', () => {
