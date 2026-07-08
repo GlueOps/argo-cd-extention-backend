@@ -124,16 +124,23 @@ See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-en
 
 ## Deployment
 
-The Helm chart under [`chart/`](chart/) is the source of truth (RBAC, securityContext,
-NetworkPolicy, PDB, probes are defined once and templated per environment):
+Deployment uses the shared GlueOps `app` chart
+([project-template-helm-chart-app](https://github.com/GlueOps/project-template-helm-chart-app),
+published to `https://helm.gpkg.io/project-template`). The per-environment value
+overlays in [`deploy/`](deploy/) carry the RBAC, securityContext, NetworkPolicy,
+PDB, and probes — see [deploy/README.md](deploy/README.md):
 
 ```bash
-helm install argocd-extension-backend-api ./chart -n argocd -f chart/values-argocd.yaml
-helm install argocd-extension-backend-api ./chart -n glueops-core -f chart/values-venus.yaml
+helm repo add project-template https://helm.gpkg.io/project-template
+helm upgrade --install argocd-extension-backend-api project-template/app --version 0.13.0 \
+  -n argocd -f deploy/values-common.yaml -f deploy/values-argocd.yaml
+helm upgrade --install argocd-extension-backend-api project-template/app --version 0.13.0 \
+  -n glueops-core -f deploy/values-common.yaml -f deploy/values-venus.yaml
 ```
 
-The raw manifests in [`manifests/`](manifests/) are a self-contained fallback kept
-in sync with the chart.
+For Argo CD, see [deploy/application.example.yaml](deploy/application.example.yaml).
+The raw manifests in [`manifests/`](manifests/) remain a self-contained,
+chart-free fallback.
 
 ## Local development
 

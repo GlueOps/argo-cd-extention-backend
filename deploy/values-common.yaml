@@ -1,0 +1,260 @@
+# Shared values for deploying the Argo CD extension backend via the GlueOps
+# app template chart (Helm repo "project-template", chart "app").
+#
+# This file carries everything that is identical across environments (pod spec,
+# security context, probes, resources, Service, PDB, and the RBAC + NetworkPolicy
+# rendered through customResources). Per-environment overrides (namespaces, env
+# vars, upstream URLs) live in values-argocd.yaml / values-venus.yaml.
+#
+# Install (layer common first, then the env file), e.g.:
+#   helm install argocd-extension-backend-api \
+#     project-template/app -n argocd \
+#     -f deploy/values-common.yaml -f deploy/values-argocd.yaml
+#
+# The customResources templates below read this custom block. It is NOT consumed
+# by the app chart directly -- only by the tpl expressions in customResources.
+backend:
+  # Render the ingress-restricting NetworkPolicy (needs a CNI that enforces it).
+  networkPolicyEnabled: true
+  # The namespace argocd-server runs in, and its pod label. Only this pod may
+  # reach the backend. A bare namespaceSelector would admit the (spoofable)
+  # argocd-server label in ANY namespace, so it is scoped by namespace name.
+  argocdServerNamespace: "argocd"
+  argocdServerPodName: "argocd-server"
+  # Namespace(s) where the backend LISTS Deployments/StatefulSets/DaemonSets and
+  # ExternalSecrets (i.e. the Application destination namespaces). A namespaced
+  # Role + RoleBinding is created in EACH. Applications get/list is always granted
+  # cluster-wide (see the ClusterRole below) because the app falls back to a
+  # cluster-wide list that a namespaced Role cannot authorize.
+  workloadNamespaces:
+    - argocd
+
+appName: argocd-extension-backend-api
+appVersion: "0.1.1"
+appEnv: "production"
+
+image:
+  registry: ghcr.io
+  repository: glueops/argocd-extension-backend-api
+  tag: v0.1.1
+  # Container listen port (app.port); also surfaced as PORT via envMap below.
+  port: 8000
+
+# Create the ServiceAccount the RBAC below binds to.
+serviceAccount:
+  create: true
+  name: argocd-extension-backend-api
+
+service:
+  enabled: true
+  type: ClusterIP
+  # Single port; app chart emits name=http, port=app.port(8000), targetPort=8000.
+  port: 8000
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+deployment:
+  enabled: true
+  replicas: 2
+  strategy: RollingUpdate
+  # Quoted so the app chart treats it as truthy: an int 0 is Go-template-falsy and
+  # the chart would silently fall back to a computed maxUnavailable (=1). Quoting
+  # keeps the bespoke chart's zero-downtime surge-then-terminate rollout.
+  maxUnavailable: "0"
+  maxSurge: 1
+  imagePullPolicy: IfNotPresent
+
+  # Spread replicas across nodes (best-effort), preserving the bespoke chart's
+  # hostname podAntiAffinity. Set explicitly so the app chart does not fall back
+  # to its default zone-only spread (a no-op on single-zone clusters).
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: argocd-extension-backend-api
+          app.kubernetes.io/instance: argocd-extension-backend-api
+
+  serviceAccount:
+    enabled: true
+    automountServiceAccountToken: true
+
+  # Pod-level security context (matches the hardened bespoke chart).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Container-level security context: non-root, read-only rootfs, no caps.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  startupProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    failureThreshold: 30
+    periodSeconds: 2
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+  # readOnlyRootFilesystem needs a writable /tmp for node.
+  volumes:
+    - name: tmp
+      emptyDir: {}
+  volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+
+  # Environment common to all installs. Per-env files merge their overrides into
+  # this map (maps deep-merge; ALLOWED_NAMESPACES etc. are set per environment).
+  envMap:
+    PORT:
+      value: "8000"
+    LOG_LEVEL:
+      value: "INFO"
+    REQUEST_TIMEOUT_MS:
+      value: "8000"
+    TEMPO_SEARCH_PATH:
+      value: "/api/search"
+    TEMPO_BASE_URL:
+      value: ""
+    GRAFANA_BASE_URL:
+      value: ""
+    VAULT_BASE_URL:
+      value: ""
+    DEPLOYMENT_CONFIG_REPO_URL:
+      value: ""
+    CONFIG_REPO_LOCAL_ROOT:
+      value: ""
+    GRAFANA_LOGS_DASHBOARD:
+      value: ""
+    GRAFANA_METRICS_DASHBOARD:
+      value: ""
+    GRAFANA_TRACES_DASHBOARD:
+      value: ""
+
+# RBAC + NetworkPolicy are not first-class in the app chart, so they are rendered
+# as customResources. Each entry is tpl-evaluated against the chart root ($), so
+# helper calls resolve names/labels/selectors identically to the built-in
+# resources -- keeping selectors and the SA subject in sync automatically.
+customResources:
+  # --- NetworkPolicy: only argocd-server may reach the backend -----------------
+  - |
+    {{- if $.Values.backend.networkPolicyEnabled }}
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: {{ include "app.name" $ }}
+      namespace: {{ include "app.namespace" $ }}
+      labels:
+        {{- include "chart.commonLabels" $ | nindent 4 }}
+    spec:
+      podSelector:
+        matchLabels:
+          {{- include "chart.appLabels" $ | nindent 6 }}
+      policyTypes:
+        - Ingress
+      ingress:
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: {{ $.Values.backend.argocdServerNamespace }}
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ $.Values.backend.argocdServerPodName }}
+          ports:
+            - protocol: TCP
+              port: {{ include "app.port" $ }}
+    {{- end }}
+
+  # --- argoproj.io Applications: get/list, CLUSTER-WIDE (always) ---------------
+  - |
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: {{ include "app.name" $ }}-applications
+      labels:
+        {{- include "chart.commonLabels" $ | nindent 4 }}
+    rules:
+      - apiGroups: ["argoproj.io"]
+        resources: ["applications"]
+        verbs: ["get", "list"]
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: {{ include "app.name" $ }}-applications
+      labels:
+        {{- include "chart.commonLabels" $ | nindent 4 }}
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: {{ include "app.name" $ }}-applications
+    subjects:
+      - kind: ServiceAccount
+        name: {{ include "chart.serviceAccountName" $ }}
+        namespace: {{ include "app.namespace" $ }}
+
+  # --- Workload/ExternalSecret list: namespaced Role per destination namespace --
+  - |
+    {{- range $ns := $.Values.backend.workloadNamespaces }}
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: {{ include "app.name" $ }}-workloads
+      namespace: {{ $ns }}
+      labels:
+        {{- include "chart.commonLabels" $ | nindent 4 }}
+    rules:
+      - apiGroups: ["apps"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+        verbs: ["list"]
+      - apiGroups: ["external-secrets.io"]
+        resources: ["externalsecrets"]
+        verbs: ["list"]
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: {{ include "app.name" $ }}-workloads
+      namespace: {{ $ns }}
+      labels:
+        {{- include "chart.commonLabels" $ | nindent 4 }}
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: Role
+      name: {{ include "app.name" $ }}-workloads
+    subjects:
+      - kind: ServiceAccount
+        name: {{ include "chart.serviceAccountName" $ }}
+        namespace: {{ include "app.namespace" $ }}
+    ---
+    {{- end }}

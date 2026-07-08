@@ -1,0 +1,22 @@
+# Environment overrides for the `argocd`-namespace install.
+# Layer on top of values-common.yaml:
+#   helm install argocd-extension-backend-api project-template/app -n argocd \
+#     -f deploy/values-common.yaml -f deploy/values-argocd.yaml
+#
+# Applications live in and deploy to `argocd`, so both namespace axes = argocd.
+backend:
+  argocdServerNamespace: "argocd"
+  workloadNamespaces:
+    - argocd
+
+deployment:
+  # Merged into values-common.yaml's envMap (maps deep-merge).
+  envMap:
+    PROMETHEUS_BASE_URL:
+      value: "http://kps-prometheus.glueops-core-kube-prometheus-stack.svc.cluster.local:9090"
+    # Only "argocd" apps are served; keep the Application probe list aligned so we
+    # don't pay for lookups the app-namespace gate would 403 anyway.
+    ARGOCD_APP_NAMESPACES:
+      value: "argocd"
+    ALLOWED_NAMESPACES:
+      value: "argocd"

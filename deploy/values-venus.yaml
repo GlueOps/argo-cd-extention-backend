@@ -1,0 +1,36 @@
+# Environment overrides for the venus install.
+# Install into `glueops-core`; the backend serves Applications that deploy into
+# the `nonprod` destination namespace:
+#   helm install argocd-extension-backend-api project-template/app -n glueops-core \
+#     -f deploy/values-common.yaml -f deploy/values-venus.yaml
+#
+# The namespace gate has two axes here (they differ), so they are set explicitly:
+#  - App-CR namespace (Argocd-Application-Name header prefix): argocd/glueops-core
+#    (where the Application CRs live). Gating on "nonprod" would 403 every request.
+#  - Destination namespace (where workload/ExternalSecret reads happen, and what
+#    the namespaced Role is scoped to): nonprod.
+backend:
+  argocdServerNamespace: "argocd"
+  workloadNamespaces:
+    - nonprod
+
+deployment:
+  # Merged into values-common.yaml's envMap (maps deep-merge).
+  envMap:
+    PROMETHEUS_BASE_URL:
+      value: "http://kps-prometheus.glueops-core-kube-prometheus-stack.svc.cluster.local:9090"
+    GRAFANA_BASE_URL:
+      value: "https://grafana.nonprod.venus.onglueops.rocks"
+    VAULT_BASE_URL:
+      value: "https://vault.nonprod.venus.onglueops.rocks"
+    DEPLOYMENT_CONFIG_REPO_URL:
+      value: "https://github.com/GlueOps/deployment-configurations"
+    ARGOCD_APP_NAMESPACES:
+      value: "argocd,glueops-core"
+    ALLOWED_APP_NAMESPACES:
+      value: "argocd,glueops-core"
+    ALLOWED_DEST_NAMESPACES:
+      value: "nonprod"
+    # Retained as the fallback default for both axes (overridden above).
+    ALLOWED_NAMESPACES:
+      value: "nonprod"

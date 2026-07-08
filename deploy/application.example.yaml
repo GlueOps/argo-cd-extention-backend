@@ -1,0 +1,73 @@
+# Example Argo CD Applications that deploy this backend via the GlueOps `app`
+# template chart (published to https://helm.gpkg.io/project-template) instead of
+# a bespoke in-repo chart. The values live in deploy/ in THIS repo and are pulled
+# in as a second ($values) source, mirroring the standard GlueOps multi-source
+# pattern (see nonprod.venus.onglueops.rocks/manifests/*.yaml).
+#
+# IMPORTANT — AppProject permissions. These value files render cluster-scoped
+# RBAC (a ClusterRole/ClusterRoleBinding for `applications` get/list) and, for
+# venus, a namespaced Role/RoleBinding in a namespace (`nonprod`) OTHER than the
+# Application's destination (`glueops-core`). The AppProject used below must
+# therefore permit:
+#   - clusterResourceWhitelist: rbac.authorization.k8s.io ClusterRole + ClusterRoleBinding
+#   - the destination namespaces it needs to write to (e.g. `nonprod` for venus)
+# Otherwise Argo CD will refuse to sync those objects.
+#
+# Pin `targetRevision` to a released `app` chart version (Chart.yaml: 0.13.0 here).
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-extension-backend-api
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    namespace: argocd
+    server: https://kubernetes.default.svc
+  sources:
+    - repoURL: https://helm.gpkg.io/project-template
+      chart: app
+      targetRevision: 0.13.0
+      helm:
+        valueFiles:
+          - $values/deploy/values-common.yaml
+          - $values/deploy/values-argocd.yaml
+    - repoURL: https://github.com/GlueOps/argo-cd-extention-backend.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-extension-backend-api-venus
+  namespace: argocd
+spec:
+  # Deploys into glueops-core; also manages a Role/RoleBinding in `nonprod`.
+  project: default
+  destination:
+    namespace: glueops-core
+    server: https://kubernetes.default.svc
+  sources:
+    - repoURL: https://helm.gpkg.io/project-template
+      chart: app
+      targetRevision: 0.13.0
+      helm:
+        valueFiles:
+          - $values/deploy/values-common.yaml
+          - $values/deploy/values-venus.yaml
+    - repoURL: https://github.com/GlueOps/argo-cd-extention-backend.git
+      targetRevision: main
+      ref: values
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

@@ -101,7 +101,7 @@ The backend intentionally does **not** need `secrets` or `pods` permissions.
 > more than the per-namespace "least privilege" the workload/ExternalSecret Roles
 > achieve. The remaining verbs *are* scoped to a namespaced `Role`/`RoleBinding`
 > when `allowedNamespaces` is a bounded list; only `*` makes them cluster-wide too.
-> The Helm chart applies this split automatically.
+> The `deploy/` overlays apply this split automatically.
 
 ## Workload discovery & degraded responses
 
@@ -129,7 +129,8 @@ export ALLOWED_NAMESPACES=*
 
 ### Staging / production
 
-Use the Helm chart values files (`chart/values-argocd.yaml`, `chart/values-venus.yaml`)
+Deploy via the GlueOps `app` chart using the overlays in `deploy/`
+(`deploy/values-argocd.yaml`, `deploy/values-venus.yaml` — see `deploy/README.md`)
 or the raw manifests in `manifests/`. Always set a bounded `ALLOWED_NAMESPACES`, wire
 `GITHUB_TOKEN` from a Secret if the config repo is private, and keep the NetworkPolicy
 enabled.

@@ -1,10 +1,11 @@
-name: Validate chart and manifests
+name: Validate deploy values and manifests
 
-# Schema-validates the Helm chart (rendered) and the raw manifests on every PR.
-# This exists because `helm lint` and `helm template` do NOT validate against the
-# Kubernetes schema -- an invalid spec (e.g. a NetworkPolicy `namespaceSelector`
-# missing its `matchLabels:` wrapper) renders and lints cleanly but is rejected by
-# the API server. `kubeconform -strict` catches that statically, with no cluster.
+# Renders the deploy/ value overlays against the GlueOps `app` chart and
+# schema-validates the output, plus the raw manifests, on every PR. This exists
+# because `helm template` does NOT validate against the Kubernetes schema -- an
+# invalid spec (e.g. a NetworkPolicy `namespaceSelector` missing its `matchLabels:`
+# wrapper) renders cleanly but is rejected by the API server. `kubeconform -strict`
+# catches that statically, with no cluster.
 
 on:
   pull_request:
@@ -20,6 +21,9 @@ env:
   KUBECONFORM_VERSION: v0.8.0
   # kubeconform validates against schemas for this k8s minor.
   KUBE_VERSION: "1.30.0"
+  # The GlueOps `app` template chart this backend deploys with.
+  APP_CHART_REPO: https://helm.gpkg.io/project-template
+  APP_CHART_VERSION: "0.13.0"
 
 jobs:
   validate:
@@ -37,22 +41,24 @@ jobs:
             | sudo tar -xz -C /usr/local/bin kubeconform
           kubeconform -v
 
-      - name: helm lint (all value files)
+      - name: Add app chart repo
         run: |
-          helm lint ./chart
-          helm lint ./chart -f ./chart/values-argocd.yaml
-          helm lint ./chart -f ./chart/values-venus.yaml
+          helm repo add project-template "${APP_CHART_REPO}"
+          helm repo update
 
-      # Render the chart with each environment's values and schema-validate the
-      # output. -strict rejects unknown/misplaced fields (the LabelSelector bug);
-      # -ignore-missing-schemas skips CRDs (Application/ExternalSecret) that have no
-      # published schema rather than failing on them.
+      # Render the app chart with each environment's overlay and schema-validate
+      # the output. -strict rejects unknown/misplaced fields (the LabelSelector
+      # bug); -ignore-missing-schemas skips CRDs (Application/ExternalSecret) that
+      # have no published schema rather than failing on them.
       - name: Validate rendered chart
         run: |
           set -euo pipefail
-          for values in values.yaml values-argocd.yaml values-venus.yaml; do
-            echo "== rendering chart with $values =="
-            helm template release ./chart -f "./chart/$values" \
+          for env in argocd venus; do
+            echo "== rendering app chart with deploy/values-$env.yaml =="
+            ns=argocd; [ "$env" = venus ] && ns=glueops-core
+            helm template argocd-extension-backend-api project-template/app \
+              --version "${APP_CHART_VERSION}" -n "$ns" \
+              -f ./deploy/values-common.yaml -f "./deploy/values-$env.yaml" \
               | kubeconform -strict -summary -verbose \
                   -kubernetes-version "${KUBE_VERSION}" \
                   -ignore-missing-schemas
