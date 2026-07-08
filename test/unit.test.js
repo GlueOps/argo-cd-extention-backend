@@ -69,7 +69,7 @@ test('parseAppContextHeader requires non-empty namespace AND appName', () => {
   assert.equal(parseAppContextHeader(':app'), null);
   assert.equal(parseAppContextHeader('ns:'), null);
   assert.equal(parseAppContextHeader(':'), null);
-  assert.equal(parseAppContextHeader('noconlon'), null);
+  assert.equal(parseAppContextHeader('nocolon'), null);
   assert.equal(parseAppContextHeader(''), null);
   assert.equal(parseAppContextHeader(undefined), null);
 });

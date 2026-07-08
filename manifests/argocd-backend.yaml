@@ -170,8 +170,11 @@ spec:
               value: ""
             - name: DEPLOYMENT_CONFIG_REPO_URL
               value: ""
+            # Only "argocd" -- must stay aligned with ALLOWED_NAMESPACES below.
+            # Any extra namespace here is probed on every lookup but then 403'd
+            # by the app-namespace gate, so it only adds latency.
             - name: ARGOCD_APP_NAMESPACES
-              value: "argocd,glueops-core"
+              value: "argocd"
             # Bounded to "argocd" -- see the Role/RoleBinding comment above for
             # why "*" (paired with cluster-wide secrets:list) is avoided here.
             - name: ALLOWED_NAMESPACES

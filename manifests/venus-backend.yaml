@@ -45,10 +45,12 @@ subjects:
 ---
 # -----------------------------------------------------------------------------
 # Namespaced Role, scoped to the "nonprod" namespace only -- this backend's
-# pod runs in "glueops-core", but ALLOWED_NAMESPACES=nonprod below means it
-# only ever serves Applications whose destination namespace is "nonprod", so
+# pod runs in "glueops-core", but ALLOWED_DEST_NAMESPACES=nonprod below means
+# it only ever serves Applications whose destination namespace is "nonprod", so
 # the actual workload/ExternalSecret discovery calls in src/server.js only
-# ever target "nonprod". src/server.js does NOT read Secret or Pod objects
+# ever target "nonprod". (The Application CRs themselves live in argocd/
+# glueops-core -- see ALLOWED_APP_NAMESPACES -- and are read cluster-wide.)
+# src/server.js does NOT read Secret or Pod objects
 # -- no core "" RBAC is requested at all -- it only lists
 # Deployments/StatefulSets/DaemonSets and ExternalSecrets to resolve
 # workload names and Vault secret paths. Scoping this Role to "nonprod"
@@ -170,7 +172,16 @@ spec:
               value: "https://github.com/GlueOps/deployment-configurations"
             - name: ARGOCD_APP_NAMESPACES
               value: "argocd,glueops-core"
-            - name: ALLOWED_NAMESPACES
+            # ALLOWED_NAMESPACES gates TWO axes; here they differ, so set them
+            # explicitly rather than collapsing both to one value:
+            #  - App-CR namespace (the Argocd-Application-Name header prefix):
+            #    Applications live in argocd/glueops-core (see ARGOCD_APP_NAMESPACES),
+            #    so gating on "nonprod" would 403 every real request.
+            #  - Destination namespace (where workload/ExternalSecret reads happen,
+            #    and what the Role below is scoped to): "nonprod".
+            - name: ALLOWED_APP_NAMESPACES
+              value: "argocd,glueops-core"
+            - name: ALLOWED_DEST_NAMESPACES
               value: "nonprod"
           startupProbe:
             httpGet:

@@ -814,6 +814,14 @@ function parseAppContextHeader(headerValue) {
 // request arrived through that authenticated path rather than direct in-cluster
 // access. Pair with a NetworkPolicy restricting ingress to argocd-server.
 function requireArgoAppContext(req, res, next) {
+  // Access is decided from the Argocd-Application-Name header, which is NOT part
+  // of the cache key. Set no-store (and Vary) here in the gate so it covers the
+  // early-return 401/403 too — otherwise an intermediary could cache an auth
+  // failure (or, worse, serve it to a later request that would have been allowed)
+  // because the route handler's no-store only runs after the gate passes.
+  res.set('Cache-Control', 'no-store');
+  res.set('Vary', 'Argocd-Application-Name');
+
   const ctx = parseAppContextHeader(req.get('Argocd-Application-Name') || '');
   if (!ctx) {
     return res.status(401).json({

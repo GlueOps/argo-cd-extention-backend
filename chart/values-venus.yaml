@@ -3,10 +3,17 @@
 # Application namespace):
 #   helm install argocd-extension-backend-api chart/ -n glueops-core -f chart/values-venus.yaml
 
-# Only Applications destined for the "nonprod" namespace may query this
-# backend; RBAC (templates/rbac.yaml) is scoped to a Role/RoleBinding in the
-# "nonprod" namespace rather than a cluster-wide ClusterRole.
+# The namespace allowlist gates two axes; here they differ, so set them
+# explicitly instead of a single allowedNamespaces:
+#  - allowedAppNamespaces: the Application-CR namespace (Argocd-Application-Name
+#    header prefix). Applications live in argocd/glueops-core (see
+#    env.argocdAppNamespaces), so gating on "nonprod" would 403 every request.
+#  - allowedDestNamespaces: spec.destination.namespace, where workload/
+#    ExternalSecret reads happen. RBAC (templates/rbac.yaml) scopes the
+#    Role/RoleBinding to this, so it stays confined to "nonprod".
 allowedNamespaces: "nonprod"
+allowedAppNamespaces: "argocd,glueops-core"
+allowedDestNamespaces: "nonprod"
 
 env:
   prometheusBaseUrl: "http://kps-prometheus.glueops-core-kube-prometheus-stack.svc.cluster.local:9090"

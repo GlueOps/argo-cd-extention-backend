@@ -14,7 +14,10 @@ env:
   grafanaBaseUrl: ""
   vaultBaseUrl: ""
   deploymentConfigRepoUrl: ""
-  argocdAppNamespaces: "argocd,glueops-core"
+  # Keep aligned with allowedNamespaces ("argocd"): an extra app namespace here
+  # is probed on every lookup but 403'd by the app-namespace gate, adding latency
+  # without allowing anything.
+  argocdAppNamespaces: "argocd"
 
 networkPolicy:
   enabled: true

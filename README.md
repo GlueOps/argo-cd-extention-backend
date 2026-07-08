@@ -19,8 +19,9 @@ in place:
    a no-op and *any* pod that can route to the Service can spoof the header. Confirm
    enforcement, and scope `argocdServerNamespaceSelector` to the real Argo CD
    namespace (the chart defaults to `kubernetes.io/metadata.name: argocd`).
-2. The app rejects requests without a well-formed app-context header (`401`), and
-   enforces the namespace allowlist on both the Application namespace
+2. The app rejects requests without a well-formed app-context header — the
+   Prometheus/Tempo proxy routes return `401`, while `/api/links` returns `400
+   invalid_request` — and enforces the namespace allowlist on both the Application namespace
    (`ALLOWED_APP_NAMESPACES`) and its destination namespace
    (`ALLOWED_DEST_NAMESPACES`) — each defaulting to `ALLOWED_NAMESPACES`.
 
