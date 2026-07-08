@@ -129,10 +129,10 @@ export ALLOWED_NAMESPACES=*
 
 ### Staging / production
 
-Use the Helm chart values files (`chart/values-argocd.yaml`, `chart/values-venus.yaml`)
-or the raw manifests in `manifests/`. Always set a bounded `ALLOWED_NAMESPACES`, wire
-`GITHUB_TOKEN` from a Secret if the config repo is private, and keep the NetworkPolicy
-enabled.
+Deploy via the platform chart (GlueOps/platform-helm-chart-platform,
+`templates/application-argocd-extension-backend.yaml`) or the raw manifests in
+`manifests/`. Always set a bounded `ALLOWED_NAMESPACES`, wire `GITHUB_TOKEN` from
+a Secret if the config repo is private, and keep the NetworkPolicy enabled.
 
 ## Troubleshooting
 

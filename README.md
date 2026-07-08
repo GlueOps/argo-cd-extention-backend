@@ -13,12 +13,12 @@ reachable **only** through that proxy. Two controls enforce this and both must b
 in place:
 
 1. A `NetworkPolicy` restricting ingress to the `argocd-server` pod (shipped in the
-   Helm chart and raw manifests). ⚠️ **A NetworkPolicy is only enforced if your CNI
+   platform chart and raw manifests). ⚠️ **A NetworkPolicy is only enforced if your CNI
    enforces NetworkPolicies.** On clusters where it does not (e.g. stock flannel, or
    EKS without the VPC CNI network-policy add-on / Calico), this control is silently
    a no-op and *any* pod that can route to the Service can spoof the header. Confirm
-   enforcement, and scope `argocdServerNamespaceSelector` to the real Argo CD
-   namespace (the chart defaults to `kubernetes.io/metadata.name: argocd`).
+   enforcement, and scope the NetworkPolicy's namespace selector to the real Argo CD
+   namespace (on GlueOps clusters, `kubernetes.io/metadata.name: glueops-core`).
 2. The app rejects requests without a well-formed app-context header — the
    Prometheus/Tempo proxy routes return `401`, while `/api/links` returns `400
    invalid_request` — and enforces the namespace allowlist on both the Application namespace
@@ -124,16 +124,13 @@ See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-en
 
 ## Deployment
 
-The Helm chart under [`chart/`](chart/) is the source of truth (RBAC, securityContext,
-NetworkPolicy, PDB, probes are defined once and templated per environment):
+This backend is deployed as a GlueOps platform component via the shared `app`
+chart, defined in the platform chart
+([GlueOps/platform-helm-chart-platform](https://github.com/GlueOps/platform-helm-chart-platform),
+`templates/application-argocd-extension-backend.yaml`).
 
-```bash
-helm install argocd-extension-backend-api ./chart -n argocd -f chart/values-argocd.yaml
-helm install argocd-extension-backend-api ./chart -n glueops-core -f chart/values-venus.yaml
-```
-
-The raw manifests in [`manifests/`](manifests/) are a self-contained fallback kept
-in sync with the chart.
+The raw manifests in [`manifests/`](manifests/) are a self-contained,
+chart-free fallback for clusters that cannot use the platform chart.
 
 ## Local development
 
