@@ -1,0 +1,40 @@
+name: Scan released image
+
+# Runs Trivy against the image published by "Build and Release Backend", in its
+# OWN workflow so the scan never shares a job with the packages:write token that
+# release.yml uses to push. This job is read-only.
+#
+# It triggers on completion of the release workflow (rather than on `release:`
+# directly) so the image is guaranteed to already be pushed before we pull it.
+on:
+  workflow_run:
+    workflows: ["Build and Release Backend"]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  scan:
+    # Only scan when the release build actually succeeded (and pushed an image).
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
+        with:
+          # The release always pushes :latest alongside the tag; scan that.
+          image-ref: ghcr.io/glueops/argocd-extension-backend-api:latest
+          format: 'table'
+          # Surface fixable critical CVEs as a failed check.
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL'
