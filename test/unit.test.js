@@ -18,7 +18,8 @@ const {
   extractAppConfigPath,
   buildGitTreeUrl,
   buildVaultSecretUrl,
-  isNamespaceAllowed
+  isNamespaceAllowed,
+  isSafeRepoRelativePath
 } = require('../src/server');
 
 test('buildQueryString preserves multi-value params and drops non-scalars', () => {
@@ -186,4 +187,18 @@ test('buildVaultSecretUrl targets the KV show view at the remoteRef key path', (
     'https://vault.example.com/ui/vault/secrets/secret/show/team/app/db'
   );
   assert.equal(buildVaultSecretUrl(''), '');
+});
+
+test('isSafeRepoRelativePath rejects traversal and non-relative paths', () => {
+  // Valid tenant-scoped paths.
+  assert.equal(isSafeRepoRelativePath('apps/team-a/values.yaml'), true);
+  assert.equal(isSafeRepoRelativePath('apps/team-a/env/prod/values.yaml'), true);
+  // Cross-tenant traversal inside the repo (leaks another tenant's Vault paths).
+  assert.equal(isSafeRepoRelativePath('apps/team-a/../team-b/values.yaml'), false);
+  assert.equal(isSafeRepoRelativePath('../secrets.yaml'), false);
+  // Non-relative / malformed forms.
+  assert.equal(isSafeRepoRelativePath('/etc/passwd'), false);
+  assert.equal(isSafeRepoRelativePath('apps\\team-a\\values.yaml'), false);
+  assert.equal(isSafeRepoRelativePath(''), false);
+  assert.equal(isSafeRepoRelativePath(null), false);
 });

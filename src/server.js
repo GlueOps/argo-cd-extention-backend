@@ -416,7 +416,21 @@ async function fetchText(url, headers) {
   }
 }
 
+// relativePath comes from the Application's valueFiles (untrusted). A "../" stays
+// inside the config repo but can still reach ANOTHER tenant's directory (e.g.
+// apps/team-a/../team-b/values.yaml) and leak their Vault paths — the local realpath
+// check only blocks escaping the repo root, and the GitHub API/raw reads pass "../"
+// straight through. So reject traversal / non-relative forms up front for ALL reads.
+function isSafeRepoRelativePath(p) {
+  return typeof p === 'string' && p !== '' &&
+    !p.includes('\\') && !p.startsWith('/') && !p.split('/').includes('..');
+}
+
 async function readConfigRepoFileText(repoUrl, revision, relativePath) {
+  if (!isSafeRepoRelativePath(relativePath)) {
+    logDebug('unsafe config repo relativePath; skipping', { relativePath });
+    return '';
+  }
   if (CONFIG_REPO_LOCAL_ROOT && normalizeGitRepoUrl(repoUrl) === normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) {
     // relativePath originates from the Application spec's valueFiles; a "../" in it
     // must not be able to read files outside the configured local root. A lexical
@@ -1290,5 +1304,6 @@ module.exports = {
   workloadsFromAppStatus,
   extractAppConfigPath,
   buildGitTreeUrl,
-  buildVaultSecretUrl
+  buildVaultSecretUrl,
+  isSafeRepoRelativePath
 };

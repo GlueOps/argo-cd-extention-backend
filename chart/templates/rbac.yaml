@@ -45,7 +45,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ $saName }}
     namespace: {{ .Release.Namespace }}
-{{- if eq ($rbacNamespaces | toString) "*" }}
+{{- if eq ($rbacNamespaces | toString | trim) "*" }}
 ---
 # -----------------------------------------------------------------------------
 # CLUSTER-WIDE RBAC NOTE
@@ -91,7 +91,9 @@ subjects:
 {{- else }}
 {{- range $ns := ($rbacNamespaces | toString | splitList ",") }}
 {{- $ns := trim $ns }}
-{{- if $ns }}
+{{- /* Skip empty entries and a stray "*" list item (a namespace literally named
+       "*" is invalid; a bare "*" would have taken the ClusterRole branch above). */ -}}
+{{- if and $ns (ne $ns "*") }}
 ---
 # -----------------------------------------------------------------------------
 # Least-privilege mode: allowedNamespaces is a bounded list, so a namespaced
