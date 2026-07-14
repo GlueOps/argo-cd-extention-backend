@@ -473,11 +473,19 @@ async function buildExternalSecretLinksFromConfig(appObj) {
   const valueFiles = collectAppSpecificValueFiles(appObj);
   const secretPaths = new Map();
 
-  // Fetch the value files concurrently rather than one-at-a-time; each fetch is
-  // independent and already bounded by REQUEST_TIMEOUT_MS.
-  const bodies = await Promise.all(
-    valueFiles.map(valueFile => readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path))
-  );
+  // Fetch the value files concurrently rather than one-at-a-time, but in bounded
+  // batches: valueFiles is derived from the (untrusted, uncapped) Application spec,
+  // so an unbounded Promise.all could burst a large number of outbound fetches.
+  // Each fetch is independent and already bounded by REQUEST_TIMEOUT_MS.
+  const VALUE_FILE_FETCH_CONCURRENCY = 5;
+  const bodies = [];
+  for (let i = 0; i < valueFiles.length; i += VALUE_FILE_FETCH_CONCURRENCY) {
+    const batch = valueFiles.slice(i, i + VALUE_FILE_FETCH_CONCURRENCY);
+    const batchBodies = await Promise.all(
+      batch.map(valueFile => readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path))
+    );
+    bodies.push(...batchBodies);
+  }
 
   bodies.forEach(body => {
     extractRemoteRefKeysFromYaml(body).forEach(secretPath => {

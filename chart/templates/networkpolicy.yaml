@@ -7,8 +7,10 @@
 #
 # PRE-APPLY CHECKS (cluster-specific):
 #   1. Confirm values.networkPolicy.argocdServerPodSelector /
-#      argocdServerNamespaceSelector match your Argo CD install (default
-#      pod selector: app.kubernetes.io/name: argocd-server, any namespace).
+#      argocdServerNamespaceSelector match your Argo CD install (defaults:
+#      pod selector app.kubernetes.io/name: argocd-server; namespace selector
+#      kubernetes.io/metadata.name: argocd -- i.e. scoped to the argocd namespace,
+#      not all namespaces).
 #   2. If your CNI enforces NetworkPolicy on kubelet health probes, add an
 #      ipBlock rule for the node CIDR(s) so the startup/readiness/liveness
 #      probes on port {{ .Values.service.port }} are not blocked. Many CNIs
