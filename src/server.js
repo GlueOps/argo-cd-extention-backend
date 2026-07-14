@@ -115,6 +115,14 @@ let k8sCustomObjectsApi = null;
 try {
   const kc = new k8s.KubeConfig();
   kc.loadFromCluster();
+  // @kubernetes/client-node >= 0.22 no longer throws from loadFromCluster() when
+  // the in-cluster env is absent — it silently loads a placeholder cluster whose
+  // server is "https://undefined:undefined". Guard against that so /readyz does
+  // not report ready (200) with a client that can never reach the apiserver.
+  const cluster = kc.getCurrentCluster();
+  if (!process.env.KUBERNETES_SERVICE_HOST || !cluster || !cluster.server || cluster.server.includes('undefined')) {
+    throw new Error('not running in-cluster (missing KUBERNETES_SERVICE_HOST or valid cluster server)');
+  }
   k8sApi = kc.makeApiClient(k8s.CoreV1Api);
   k8sAppsApi = kc.makeApiClient(k8s.AppsV1Api);
   k8sCustomObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi);
