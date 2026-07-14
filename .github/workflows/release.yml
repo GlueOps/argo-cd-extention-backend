@@ -4,10 +4,10 @@ on:
   release:
     types: [created]
 
-# Least privilege: only what publishing an image + attaching scan/SBOM needs.
+# Least privilege: default every job to read-only; only the image-push job below
+# opts into packages: write.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   test:
@@ -29,6 +29,11 @@ jobs:
   build-and-release:
     needs: test
     runs-on: ubuntu-latest
+    # Only this job pushes to GHCR, so scope packages: write here rather than
+    # granting it workflow-wide (the test job stays read-only).
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
