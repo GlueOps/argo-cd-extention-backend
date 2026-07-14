@@ -63,15 +63,19 @@ const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || ''
 const CONFIG_REPO_LOCAL_ROOT = (process.env.CONFIG_REPO_LOCAL_ROOT || '').trim();
 const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
-const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES || '*').trim();
+// Use ?? (not ||) so that only an UNSET var falls back to the default. An
+// explicitly empty value (e.g. `ALLOWED_NAMESPACES=""`, or a Helm value that
+// renders to "") must NOT silently become the "*" allow-all default — it fails
+// closed (deny all), consistent with a whitespace-only value which trims to "".
+const ALLOWED_NAMESPACES = (process.env.ALLOWED_NAMESPACES ?? '*').trim();
 // ALLOWED_NAMESPACES gates two DIFFERENT axes of Argo's model: the namespace the
 // Application CR lives in (the header prefix) and the Application's destination
 // namespace where workloads actually run. These are frequently not the same — an
 // app CR in `argocd` can deploy to a per-tenant destination namespace — so enforcing
 // one list against both 403s legitimate apps. Split them: each axis defaults to
 // ALLOWED_NAMESPACES (backward compatible) but can be overridden independently.
-const ALLOWED_APP_NAMESPACES = (process.env.ALLOWED_APP_NAMESPACES || ALLOWED_NAMESPACES).trim();
-const ALLOWED_DEST_NAMESPACES = (process.env.ALLOWED_DEST_NAMESPACES || ALLOWED_NAMESPACES).trim();
+const ALLOWED_APP_NAMESPACES = (process.env.ALLOWED_APP_NAMESPACES ?? ALLOWED_NAMESPACES).trim();
+const ALLOWED_DEST_NAMESPACES = (process.env.ALLOWED_DEST_NAMESPACES ?? ALLOWED_NAMESPACES).trim();
 
 // Grafana dashboard paths ("<uid>" or "<uid>/<slug>"). Defaults match the GlueOps
 // platform dashboards; override per-cluster instead of hardcoding inline.
@@ -858,7 +862,8 @@ function requireArgoAppContext(req, res, next) {
 
 async function fetchJson(url) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, REQUEST_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
@@ -881,6 +886,18 @@ async function fetchJson(url) {
       payload,
       bodyText
     };
+  } catch (err) {
+    // undici's global fetch surfaces an abort during the connect/headers phase as
+    // a generic TypeError ("fetch failed"), NOT an AbortError — only an abort while
+    // reading the body yields an AbortError. Proxy handlers branch on
+    // err.name === 'AbortError' to tell "upstream slow" (504) from "upstream broken"
+    // (502), so normalize our own timeout to an AbortError regardless of phase.
+    if (timedOut || controller.signal.aborted) {
+      const timeoutErr = new Error('upstream request timed out');
+      timeoutErr.name = 'AbortError';
+      throw timeoutErr;
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }

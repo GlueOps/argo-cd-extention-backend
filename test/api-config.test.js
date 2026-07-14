@@ -55,3 +55,14 @@ test('an allowed namespace returns Grafana + Vault categories', async () => {
 
   assert.equal(body.status, 'degraded');
 });
+
+// Proxy routes (via requireArgoAppContext) enforce the app-namespace allow-list too,
+// not just /api/links. prod is outside ALLOWED_NAMESPACES=nonprod, so the gate 403s
+// before the missing-PROMETHEUS_BASE_URL config check can run.
+test('a proxy route rejects a namespace outside the allow-list with 403', async () => {
+  const res = await fetch(`${base}/api/datasources/proxy/prometheus/api/v1/query?query=up`, {
+    headers: { 'Argocd-Application-Name': 'prod:app' }
+  });
+  assert.equal(res.status, 403);
+  assert.equal((await res.json()).errorType, 'forbidden');
+});
