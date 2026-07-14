@@ -88,8 +88,8 @@ The pod uses its in-cluster ServiceAccount. Required verbs (read-only):
 | API group | Resource | Verbs | Scope |
 | --- | --- | --- | --- |
 | `argoproj.io` | `applications` | `get`, `list` | **cluster-wide (always)** |
-| `external-secrets.io` | `externalsecrets` | `list` | namespaced when `allowedNamespaces` is bounded, else cluster-wide |
-| `apps` | `deployments`, `statefulsets`, `daemonsets` | `list` | namespaced when `allowedNamespaces` is bounded, else cluster-wide |
+| `external-secrets.io` | `externalsecrets` | `list` | namespaced when `allowedDestNamespaces` (falling back to `allowedNamespaces`) is bounded, else cluster-wide |
+| `apps` | `deployments`, `statefulsets`, `daemonsets` | `list` | namespaced when `allowedDestNamespaces` (falling back to `allowedNamespaces`) is bounded, else cluster-wide |
 
 The backend intentionally does **not** need `secrets` or `pods` permissions.
 
@@ -100,7 +100,8 @@ The backend intentionally does **not** need `secrets` or `pods` permissions.
 > spec (source repo, revision, destination, project) — not secret material, but
 > more than the per-namespace "least privilege" the workload/ExternalSecret Roles
 > achieve. The remaining verbs *are* scoped to a namespaced `Role`/`RoleBinding`
-> when `allowedNamespaces` is a bounded list; only `*` makes them cluster-wide too.
+> when `allowedDestNamespaces` (or, unset, `allowedNamespaces`) is a bounded list —
+> the reads happen in the destination namespace; only `*` makes them cluster-wide too.
 > The Helm chart applies this split automatically.
 
 ## Workload discovery & degraded responses

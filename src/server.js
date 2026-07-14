@@ -135,6 +135,16 @@ try {
   // This is OK - we'll gracefully degrade if k8s client isn't available
 }
 
+// Test-only seam: inject fake k8s clients so the appObj-resolved code paths
+// (destination-namespace gating, workload discovery) can be exercised without a
+// live cluster. Never called in production.
+function __setK8sClientsForTest(clients) {
+  if (clients && typeof clients === 'object') {
+    if ('appsApi' in clients) k8sAppsApi = clients.appsApi;
+    if ('customObjectsApi' in clients) k8sCustomObjectsApi = clients.customObjectsApi;
+  }
+}
+
 // The @kubernetes/client-node calls used below have no built-in timeout, so a
 // wedged apiserver could make /api/links hang far past REQUEST_TIMEOUT_MS. Wrap
 // each call so the CALLER fails fast and degrades gracefully instead.
@@ -262,7 +272,7 @@ function parseGitHubRepo(repoUrl) {
 
 function buildGitRawUrl(repoUrl, revision, relativePath) {
   const repo = parseGitHubRepo(repoUrl);
-  if (!repo) return '';
+  if (!repo || typeof revision !== 'string' || typeof relativePath !== 'string') return '';
   const encodedRevision = encodeURIComponent(revision.trim());
   const encodedPath = encodePathSegments(relativePath.trim());
   if (!encodedPath) return '';
@@ -271,7 +281,7 @@ function buildGitRawUrl(repoUrl, revision, relativePath) {
 
 function buildGitHubContentsApiUrl(repoUrl, revision, relativePath) {
   const repo = parseGitHubRepo(repoUrl);
-  if (!repo) return '';
+  if (!repo || typeof revision !== 'string' || typeof relativePath !== 'string') return '';
   const encodedPath = encodePathSegments(relativePath.trim());
   const params = new URLSearchParams({ ref: revision.trim() });
   return `https://api.github.com/repos/${repo.owner}/${repo.repo}/contents/${encodedPath}?${params.toString()}`;
@@ -281,6 +291,10 @@ function buildVaultSecretUrl(secretPath) {
   if (!VAULT_BASE_URL || typeof secretPath !== 'string') return '';
   const trimmedPath = secretPath.trim().replace(/^secret\//, '').replace(/^\/+|\/+$/g, '');
   if (!trimmedPath) return '';
+  // A remoteRef.key never legitimately contains "." / ".." segments; reject them so
+  // the emitted Vault UI link can't render a traversal (`../`) — consistent with the
+  // config-repo read/link paths which reject the same.
+  if (trimmedPath.split('/').some(seg => seg === '.' || seg === '..')) return '';
   // Navigate straight to the secret (and its keys) via the KV "show" view, at any nesting
   // depth — not the parent folder list. The path comes from ExternalSecret remoteRef.key.
   return `${VAULT_BASE_URL}/ui/vault/secrets/secret/show/${encodePathSegments(trimmedPath)}`;
@@ -375,7 +389,7 @@ function collectAppSpecificValueFiles(appObj) {
       // backend would send GITHUB_TOKEN to fetch from any repo an Application names
       // (confused-deputy read of out-of-scope repos). Requires DEPLOYMENT_CONFIG_REPO_URL.
       if (!DEPLOYMENT_CONFIG_REPO_URL || normalizeGitRepoUrl(refSource.repoURL) !== normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) return;
-      const revision = typeof refSource.targetRevision === 'string' && refSource.targetRevision.trim() !== '' ? refSource.targetRevision : 'main';
+      const revision = typeof refSource.targetRevision === 'string' && refSource.targetRevision.trim() !== '' ? refSource.targetRevision.trim() : 'main';
       files.push({
         repoUrl: refSource.repoURL,
         revision,
@@ -500,6 +514,17 @@ function extractRemoteRefKeysFromYaml(yamlText) {
 }
 
 async function buildExternalSecretLinksFromConfig(appObj) {
+  try {
+    return await buildExternalSecretLinksFromConfigInner(appObj);
+  } catch (err) {
+    // Match getRelatedExternalSecretLinks: never let a config-repo read failure fail
+    // the whole /api/links response — degrade to no secret links instead.
+    logDebug('buildExternalSecretLinksFromConfig failed', err.message);
+    return [];
+  }
+}
+
+async function buildExternalSecretLinksFromConfigInner(appObj) {
   const valueFiles = collectAppSpecificValueFiles(appObj);
   const secretPaths = new Map();
 
@@ -540,7 +565,9 @@ function buildConfigRepoLinks(appObj) {
     const valueFiles = source.helm && Array.isArray(source.helm.valueFiles) ? source.helm.valueFiles : [];
     valueFiles.forEach(valueFile => {
       const parsed = extractRefPath(valueFile);
-      if (!parsed) return;
+      // Reject traversal paths for the emitted link too, consistent with the read
+      // paths (isSafeRepoRelativePath), so a "../" can't render an escaping hyperlink.
+      if (!parsed || !isSafeRepoRelativePath(parsed.path)) return;
       const refSource = refs[parsed.ref];
       if (!refSource || typeof refSource !== 'object') return;
       const repoUrl = typeof refSource.repoURL === 'string' ? refSource.repoURL : '';
@@ -1018,7 +1045,13 @@ app.get('/api/links', asyncHandler(async (req, res) => {
   // (2) fall back to live listing on THIS cluster only; (3) last resort, infer from
   // the app name and flag the result as degraded so the UI/user isn't misled into
   // trusting a guessed workload name.
-  let workloads = workloadsFromAppStatus(appObj, destinationNamespace);
+  // status.resources[] can name resources in namespaces other than the (already
+  // allow-list-gated) destination namespace. Bound every emitted namespace to
+  // ALLOWED_DEST_NAMESPACES too, so a cross-namespace resource can't leak an
+  // out-of-scope namespace into a Grafana var-namespace link. With the default "*"
+  // this filters nothing.
+  let workloads = workloadsFromAppStatus(appObj, destinationNamespace)
+    .filter(w => isNamespaceAllowed(w.namespace, ALLOWED_DEST_NAMESPACES));
   let workloadsInferred = false;
   if (workloads.length === 0 && !isRemoteDestination) {
     workloads = await getAppResources(destinationNamespace, appName);
@@ -1305,5 +1338,7 @@ module.exports = {
   extractAppConfigPath,
   buildGitTreeUrl,
   buildVaultSecretUrl,
-  isSafeRepoRelativePath
+  isSafeRepoRelativePath,
+  collectAppSpecificValueFiles,
+  __setK8sClientsForTest
 };

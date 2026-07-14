@@ -19,7 +19,8 @@ const {
   buildGitTreeUrl,
   buildVaultSecretUrl,
   isNamespaceAllowed,
-  isSafeRepoRelativePath
+  isSafeRepoRelativePath,
+  collectAppSpecificValueFiles
 } = require('../src/server');
 
 test('buildQueryString preserves multi-value params and drops non-scalars', () => {
@@ -201,4 +202,43 @@ test('isSafeRepoRelativePath rejects traversal and non-relative paths', () => {
   assert.equal(isSafeRepoRelativePath('apps\\team-a\\values.yaml'), false);
   assert.equal(isSafeRepoRelativePath(''), false);
   assert.equal(isSafeRepoRelativePath(null), false);
+});
+
+test('isNamespaceAllowed fails closed on an empty or whitespace-only list', () => {
+  // Regression for the `??`-not-`||` fix: an explicitly empty allow-list must deny,
+  // never behave like the "*" wildcard.
+  assert.equal(isNamespaceAllowed('argocd', ''), false);
+  assert.equal(isNamespaceAllowed('argocd', '   '), false);
+  assert.equal(isNamespaceAllowed('', ''), false);
+});
+
+test('parseAppContextHeader does not strip an embedded newline (first-colon, trim-only)', () => {
+  // Pins the intentional semantics: trim removes only leading/trailing whitespace,
+  // so an embedded newline stays in the namespace (which then fails the allow-list).
+  assert.deepEqual(parseAppContextHeader('ns\napp:x'), { namespace: 'ns\napp', appName: 'x' });
+});
+
+test('buildUrl neutralizes a leading backslash path (SSRF sibling of //host)', () => {
+  const out = buildUrl('http://prom:9090', '\\evil.com/api/v1/query', { query: 'up' });
+  assert.ok(out.startsWith('http://prom:9090/'), `expected same host, got ${out}`);
+});
+
+test('buildVaultSecretUrl rejects a remoteRef key with a traversal segment', () => {
+  // A "../" key must not render a traversal into the Vault UI link.
+  assert.equal(buildVaultSecretUrl('secret/foo/../../bar'), '');
+  assert.equal(buildVaultSecretUrl('foo/./bar'), '');
+});
+
+test('collectAppSpecificValueFiles only returns files from DEPLOYMENT_CONFIG_REPO_URL', () => {
+  // DEPLOYMENT_CONFIG_REPO_URL is unset in this test process, so the confused-deputy
+  // scope check rejects every value file regardless of the repo it names.
+  const appObj = {
+    spec: {
+      sources: [
+        { ref: 'cfg', repoURL: 'https://github.com/attacker/private', targetRevision: 'main' },
+        { repoURL: 'https://github.com/glueops/app', path: 'app', helm: { valueFiles: ['$cfg/apps/team-a/values.yaml'] } }
+      ]
+    }
+  };
+  assert.deepEqual(collectAppSpecificValueFiles(appObj), []);
 });
