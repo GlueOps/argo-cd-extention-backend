@@ -481,21 +481,7 @@ async function buildExternalSecretLinksFromConfig(appObj) {
   const valueFiles = collectAppSpecificValueFiles(appObj);
   const secretPaths = new Map();
 
-  // Fetch the value files concurrently rather than one-at-a-time, but in bounded
-  // batches: valueFiles is derived from the (untrusted, uncapped) Application spec,
-  // so an unbounded Promise.all could burst a large number of outbound fetches.
-  // Each fetch is independent and already bounded by REQUEST_TIMEOUT_MS.
-  const VALUE_FILE_FETCH_CONCURRENCY = 5;
-  const bodies = [];
-  for (let i = 0; i < valueFiles.length; i += VALUE_FILE_FETCH_CONCURRENCY) {
-    const batch = valueFiles.slice(i, i + VALUE_FILE_FETCH_CONCURRENCY);
-    const batchBodies = await Promise.all(
-      batch.map(valueFile => readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path))
-    );
-    bodies.push(...batchBodies);
-  }
-
-  bodies.forEach(body => {
+  const collectFromBody = body => {
     extractRemoteRefKeysFromYaml(body).forEach(secretPath => {
       const url = buildVaultSecretUrl(secretPath);
       const label = labelFromSecretPath(secretPath);
@@ -503,7 +489,21 @@ async function buildExternalSecretLinksFromConfig(appObj) {
         secretPaths.set(url, { url, label });
       }
     });
-  });
+  };
+
+  // Fetch the value files concurrently rather than one-at-a-time, but in bounded
+  // batches: valueFiles is derived from the (untrusted, uncapped) Application spec,
+  // so an unbounded Promise.all could burst a large number of outbound fetches.
+  // Extract keys per batch so we never hold every file body in memory at once.
+  // Each fetch is independent and already bounded by REQUEST_TIMEOUT_MS.
+  const VALUE_FILE_FETCH_CONCURRENCY = 5;
+  for (let i = 0; i < valueFiles.length; i += VALUE_FILE_FETCH_CONCURRENCY) {
+    const batch = valueFiles.slice(i, i + VALUE_FILE_FETCH_CONCURRENCY);
+    const batchBodies = await Promise.all(
+      batch.map(valueFile => readConfigRepoFileText(valueFile.repoUrl, valueFile.revision, valueFile.path))
+    );
+    batchBodies.forEach(collectFromBody);
+  }
 
   return Array.from(secretPaths.values());
 }
@@ -956,9 +956,12 @@ app.get('/api/links', asyncHandler(async (req, res) => {
   }
 
   const destination = appSpec.destination && typeof appSpec.destination === 'object' ? appSpec.destination : {};
-  const destinationNamespace = typeof destination.namespace === 'string' && destination.namespace
-    ? destination.namespace
-    : namespace;
+  // Trim like the header namespace (parseAppContextHeader) and the allowlist
+  // entries (isNamespaceAllowed) so accidental whitespace in
+  // spec.destination.namespace does not cause a spurious 403 or a resource
+  // lookup against the wrong namespace string.
+  const trimmedDestNamespace = typeof destination.namespace === 'string' ? destination.namespace.trim() : '';
+  const destinationNamespace = trimmedDestNamespace || namespace;
 
   // Also gate the namespace we actually read from: destination can differ from the
   // Application's own namespace and point at something not intended to be exposed.
@@ -1105,17 +1108,17 @@ app.get('/api/datasources/proxy/prometheus/api/v1/query', requireArgoAppContext,
       });
     }
 
-    // A 200 with an unparseable body is an upstream fault, not an empty result;
-    // surface it instead of fabricating a successful empty vector.
-    if (result.payload === null && result.bodyText) {
+    // A 200 with an empty or unparseable body is an upstream fault, not an empty
+    // result; surface it instead of fabricating a successful empty vector.
+    if (result.payload === null) {
       return res.status(502).json({
         status: 'error',
         errorType: 'invalid_upstream_response',
-        error: 'upstream returned a non-JSON response'
+        error: 'upstream returned an empty or non-JSON response'
       });
     }
 
-    return res.status(200).json(result.payload || { status: 'success', data: { resultType: 'vector', result: [] } });
+    return res.status(200).json(result.payload);
   } catch (err) {
     // Don't echo err.message to the client: for a fetch failure it can include the
     // upstream host (getaddrinfo ENOTFOUND <host>) and for buildUrl the internal
@@ -1157,6 +1160,18 @@ app.get('/api/datasources/proxy/tempo/api/search', requireArgoAppContext, async 
         status: 'error',
         errorType: 'upstream_error',
         error: `upstream returned status ${result.status}`,
+        traces: []
+      });
+    }
+
+    // A 200 with an empty or unparseable body is an upstream fault, not an empty
+    // trace set — surface it (with a renderable empty array, as elsewhere in this
+    // handler) instead of masking it as "no traces".
+    if (result.payload === null) {
+      return res.status(502).json({
+        status: 'error',
+        errorType: 'invalid_upstream_response',
+        error: 'upstream returned an empty or non-JSON response',
         traces: []
       });
     }
