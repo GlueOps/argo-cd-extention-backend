@@ -88,6 +88,17 @@ test('whitespace-padded destination namespace is trimmed before the allow-list c
   assert.equal(res.status, 200); // "  tenant-b  " trims to tenant-b, which is allowed
 });
 
+test('an unresolvable Application degrades to 200 (not a spurious dest-namespace 403)', async () => {
+  // getArgoApplication returns null (fake throws 404 for unknown names). The dest
+  // gate must NOT fire on the app-namespace fallback (argocd is not in the dest list
+  // tenant-b) — a k8s resolution failure must not become an authorization 403.
+  const res = await links('does-not-exist');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.status, 'degraded');
+  assert.ok(body.warnings.some(w => /could not be resolved/.test(w)), 'expected a best-effort warning');
+});
+
 test('a status.resources namespace outside ALLOWED_DEST_NAMESPACES is filtered from links', async () => {
   const res = await links('cross-ns');
   assert.equal(res.status, 200);

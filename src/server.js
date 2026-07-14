@@ -1030,7 +1030,13 @@ app.get('/api/links', asyncHandler(async (req, res) => {
 
   // Also gate the namespace we actually read from: destination can differ from the
   // Application's own namespace and point at something not intended to be exposed.
-  if (!isNamespaceAllowed(destinationNamespace, ALLOWED_DEST_NAMESPACES)) {
+  // Only enforce this once the Application is RESOLVED, so `destinationNamespace` is
+  // the real spec.destination.namespace. If resolution failed (k8s client
+  // unavailable / transient timeout), it falls back to the app's own namespace —
+  // gating on that fallback would turn a dependency failure into a spurious 403 in
+  // split-allowlist setups (app ns `argocd` allowed, dest ns `nonprod` allowed).
+  // When unresolved we degrade to a warning below; RBAC still bounds any actual read.
+  if (appObj && !isNamespaceAllowed(destinationNamespace, ALLOWED_DEST_NAMESPACES)) {
     return res.status(403).json({
       status: 'error',
       errorType: 'forbidden',
@@ -1040,6 +1046,9 @@ app.get('/api/links', asyncHandler(async (req, res) => {
 
   const isRemoteDestination = isRemoteCluster(destination);
   const warnings = [];
+  if (!appObj) {
+    warnings.push('application could not be resolved (kubernetes API unavailable or app not found); results are best-effort');
+  }
 
   // Workload discovery: (1) prefer Argo's authoritative status.resources[];
   // (2) fall back to live listing on THIS cluster only; (3) last resort, infer from
