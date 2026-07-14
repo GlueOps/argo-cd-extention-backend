@@ -3,11 +3,11 @@ FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432
 
 WORKDIR /app
 
-# Copy manifests first for better layer caching. Prefer reproducible installs:
-# `npm ci` uses the committed package-lock.json. Commit that lockfile so image
-# builds are deterministic; the `||` keeps builds working until it's committed.
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm install --omit=dev
+# Copy the package manifests (package.json + lockfile) first for better layer
+# caching, then install with a strict, reproducible `npm ci` against the committed
+# package-lock.json (fails fast on any lockfile drift).
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY src ./src
 

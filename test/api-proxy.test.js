@@ -1,23 +1,13 @@
 'use strict';
 
-// Prometheus/Tempo proxy behavior against a controllable fake upstream.
-// Set env BEFORE requiring the server (config is read at module load). We point the
-// proxies at local fake HTTP servers on fixed ports and keep REQUEST_TIMEOUT_MS short
-// so the timeout case is fast and deterministic.
-const PROM_PORT = 34191;
-const TEMPO_PORT = 34192;
-process.env.ALLOWED_NAMESPACES = '*';
-process.env.PROMETHEUS_BASE_URL = `http://127.0.0.1:${PROM_PORT}`;
-process.env.TEMPO_BASE_URL = `http://127.0.0.1:${TEMPO_PORT}`;
-process.env.TEMPO_SEARCH_PATH = '/api/search';
-process.env.REQUEST_TIMEOUT_MS = '300';
-
+// Prometheus/Tempo proxy behavior against controllable fake upstreams.
+// Fake upstreams bind on ephemeral ports (listen(0)); we set the *_BASE_URL env from
+// their assigned ports and require the server AFTER binding (config is read at module
+// load), so there are no hard-coded ports to collide in CI / parallel runs.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { before, after } = require('node:test');
-
-const { app } = require('../src/server');
 
 const APP_HEADER = { 'Argocd-Application-Name': 'default:app' };
 
@@ -45,13 +35,19 @@ function makeUpstream(kind) {
   });
 }
 
-let server, base;
+let app, server, base;
 const prom = makeUpstream('prometheus');
 const tempo = makeUpstream('tempo');
 
 before(async () => {
-  await new Promise(r => prom.listen(PROM_PORT, r));
-  await new Promise(r => tempo.listen(TEMPO_PORT, r));
+  await new Promise(r => prom.listen(0, '127.0.0.1', r));
+  await new Promise(r => tempo.listen(0, '127.0.0.1', r));
+  process.env.ALLOWED_NAMESPACES = '*';
+  process.env.PROMETHEUS_BASE_URL = `http://127.0.0.1:${prom.address().port}`;
+  process.env.TEMPO_BASE_URL = `http://127.0.0.1:${tempo.address().port}`;
+  process.env.TEMPO_SEARCH_PATH = '/api/search';
+  process.env.REQUEST_TIMEOUT_MS = '300';
+  ({ app } = require('../src/server')); // require AFTER env is set
   server = app.listen(0);
   await new Promise(r => server.once('listening', r));
   base = `http://127.0.0.1:${server.address().port}`;

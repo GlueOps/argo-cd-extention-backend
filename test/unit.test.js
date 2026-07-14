@@ -142,6 +142,9 @@ test('metadataMatchesApp trusts instance labels/name but NOT the bare app label'
   // The bare `app` label is a loose convention; matching it cross-attributes workloads.
   assert.equal(metadataMatchesApp({ labels: { app: 'api' } }, 'api'), false);
   assert.equal(metadataMatchesApp({ labels: { app: 'redis' } }, 'api'), false);
+  // `app.kubernetes.io/name` is the chart/app name, shared across releases of the
+  // same chart — it must NOT match (would cross-attribute unrelated workloads).
+  assert.equal(metadataMatchesApp({ labels: { 'app.kubernetes.io/name': 'api' } }, 'api'), false);
 });
 
 test('workloadsFromAppStatus reads authoritative status.resources[]', () => {

@@ -112,8 +112,8 @@ function logDebug(message, meta) {
   }
 }
 
-// Initialize Kubernetes client (in-cluster config)
-let k8sApi = null;
+// Initialize Kubernetes client (in-cluster config). Only AppsV1 (workload listing)
+// and CustomObjects (Applications + ExternalSecrets) are needed for link resolution.
 let k8sAppsApi = null;
 let k8sCustomObjectsApi = null;
 try {
@@ -127,7 +127,6 @@ try {
   if (!process.env.KUBERNETES_SERVICE_HOST || !cluster || !cluster.server || cluster.server.includes('undefined')) {
     throw new Error('not running in-cluster (missing KUBERNETES_SERVICE_HOST or valid cluster server)');
   }
-  k8sApi = kc.makeApiClient(k8s.CoreV1Api);
   k8sAppsApi = kc.makeApiClient(k8s.AppsV1Api);
   k8sCustomObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi);
   logDebug('Kubernetes client initialized');
@@ -371,6 +370,11 @@ function collectAppSpecificValueFiles(appObj) {
       if (!parsed || !/^apps\/[^/]+\//.test(parsed.path)) return;
       const refSource = refs[parsed.ref];
       if (!refSource || typeof refSource !== 'object' || typeof refSource.repoURL !== 'string' || refSource.repoURL.trim() === '') return;
+      // Only read value files from the configured deployment-config repo. An
+      // Application can reference arbitrary source repoURLs; without this scope the
+      // backend would send GITHUB_TOKEN to fetch from any repo an Application names
+      // (confused-deputy read of out-of-scope repos). Requires DEPLOYMENT_CONFIG_REPO_URL.
+      if (!DEPLOYMENT_CONFIG_REPO_URL || normalizeGitRepoUrl(refSource.repoURL) !== normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) return;
       const revision = typeof refSource.targetRevision === 'string' && refSource.targetRevision.trim() !== '' ? refSource.targetRevision : 'main';
       files.push({
         repoUrl: refSource.repoURL,
@@ -723,10 +727,13 @@ async function getRelatedExternalSecretLinks(namespace, appName) {
 function metadataMatchesApp(metadata, appName) {
   const md = metadata && typeof metadata === 'object' ? metadata : {};
   const labels = md.labels && typeof md.labels === 'object' ? md.labels : {};
+  // Trust only instance identifiers (unique per Argo CD Application) and the exact
+  // resource name. `app.kubernetes.io/name` is the chart/app name — shared across
+  // every Helm release of the same chart — so matching it cross-attributes unrelated
+  // workloads (e.g. two releases of the same chart in one namespace) to this app.
   return (
     labels['argocd.argoproj.io/instance'] === appName ||
     labels['app.kubernetes.io/instance'] === appName ||
-    labels['app.kubernetes.io/name'] === appName ||
     md.name === appName
   );
 }
@@ -915,7 +922,7 @@ app.get('/healthz', (_req, res) => {
 // on that client, so keep the pod out of Service endpoints until it's ready
 // rather than serving degraded responses.
 app.get('/readyz', (_req, res) => {
-  const ready = Boolean(k8sApi && k8sAppsApi && k8sCustomObjectsApi);
+  const ready = Boolean(k8sAppsApi && k8sCustomObjectsApi);
   if (!ready) {
     return res.status(503).json({ status: 'not_ready', reason: 'kubernetes client not initialized' });
   }
@@ -1009,10 +1016,12 @@ app.get('/api/links', asyncHandler(async (req, res) => {
   }
 
   // Secret links come only from ExternalSecret remoteRef keys (real Vault paths).
+  // Skip that work entirely when Vault isn't configured (the results are only used
+  // in the `if (VAULT_BASE_URL)` block below) to avoid needless k8s/GitHub load.
   // Live ExternalSecrets live on the local cluster, so skip them for remote destinations.
   const [externalSecretLinks, configExternalSecretLinks, configRepoLinks] = await Promise.all([
-    isRemoteDestination ? Promise.resolve([]) : getRelatedExternalSecretLinks(destinationNamespace, appName),
-    buildExternalSecretLinksFromConfig(appObj),
+    VAULT_BASE_URL && !isRemoteDestination ? getRelatedExternalSecretLinks(destinationNamespace, appName) : Promise.resolve([]),
+    VAULT_BASE_URL ? buildExternalSecretLinksFromConfig(appObj) : Promise.resolve([]),
     Promise.resolve(buildConfigRepoLinks(appObj))
   ]);
 

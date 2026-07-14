@@ -21,8 +21,8 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
-      # Reproducible install; falls back to `npm install` until a lockfile is committed.
-      - run: npm ci || npm install
+      # Reproducible, strict install from the committed package-lock.json.
+      - run: npm ci
 
       - run: npm test
 
