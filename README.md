@@ -105,7 +105,9 @@ Response contract notes for UI consumers:
 | `PORT` | `8000` | Listen port (1–65535). |
 | `LOG_LEVEL` | `INFO` | `INFO` or `DEBUG`. |
 | `REQUEST_TIMEOUT_MS` | `8000` | Timeout for upstream HTTP **and** Kubernetes API calls. |
-| `ALLOWED_NAMESPACES` | `*` | Comma-separated allow-list, or `*`. **`*` plus broad RBAC is unsafe on shared clusters — set a bounded list.** |
+| `ALLOWED_NAMESPACES` | `*` | Comma-separated allow-list, or `*`, applied to **both** namespace axes below. **`*` plus broad RBAC is unsafe on shared clusters — set a bounded list.** An explicitly empty value fails closed (denies all). |
+| `ALLOWED_APP_NAMESPACES` | `ALLOWED_NAMESPACES` | Overrides the allow-list for the **Application CR** namespace (the `Argocd-Application-Name` header prefix). |
+| `ALLOWED_DEST_NAMESPACES` | `ALLOWED_NAMESPACES` | Overrides the allow-list for the Application's **`spec.destination.namespace`** (where workload/secret reads happen). Set this when apps live in `argocd` but deploy elsewhere — otherwise one list gates both axes and 403s them. See [CONFIGURATION.md](CONFIGURATION.md). |
 | `ARGOCD_APP_NAMESPACES` | `argocd,glueops-core` | Namespaces to look up Application CRs in. |
 | `PROMETHEUS_BASE_URL` | — | Enables the Prometheus proxy. |
 | `TEMPO_BASE_URL` | — | Enables the Tempo proxy (empty ⇒ `{ "traces": [] }`). |
@@ -124,6 +126,12 @@ See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-en
 
 ## Deployment
 
+> **Prerequisite — the image tag must exist.** The chart and the raw manifests both
+> reference `v0.1.1`, matching `package.json`. At the time of writing the only
+> published tag is the malformed `v.0.0.1`, so a `v0.1.1` release must be cut first
+> (the release workflow verifies the tag matches `package.json`). Otherwise override
+> `image.tag` — without one of the two, the pod lands in `ImagePullBackOff`.
+
 The Helm chart under [`chart/`](chart/) is the source of truth (RBAC, securityContext,
 NetworkPolicy, PDB, probes are defined once and templated per environment):
 
@@ -131,6 +139,11 @@ NetworkPolicy, PDB, probes are defined once and templated per environment):
 helm install argocd-extension-backend-api ./chart -n argocd -f chart/values-argocd.yaml
 helm install argocd-extension-backend-api ./chart -n glueops-core -f chart/values-venus.yaml
 ```
+
+Both installs can share one cluster: RBAC object names are qualified with the release
+namespace, so the cluster-scoped `ClusterRole`/`ClusterRoleBinding` created by each do
+not collide. Keep the release name and namespace as shown, or the two installs will
+fight over the same cluster-scoped objects.
 
 The raw manifests in [`manifests/`](manifests/) are a self-contained fallback kept
 in sync with the chart.
@@ -160,5 +173,13 @@ npm test   # node --test — unit tests for pure helpers + integration tests ove
 ## Release model
 
 Images publish to `ghcr.io/glueops/argocd-extension-backend-api` on GitHub Release
-creation. The workflow runs tests, builds with SBOM + provenance attestations, and
-fails on fixable critical CVEs (Trivy).
+creation. The release workflow runs the test suite, verifies the release tag matches
+`package.json`'s version, and builds with SBOM + provenance attestations.
+
+A separate, read-only workflow (`image-scan.yml`) then scans the published image for
+fixable critical CVEs with Trivy. This is **post-publish detection, not a publish
+gate**: it runs after the image is already pushed, and a failure does not unpublish
+it. The split is deliberate — it keeps Trivy and its transitive action dependencies
+out of any job holding the `packages: write` token.
+
+Tests gate merges via `validate.yml`, which runs on every pull request.

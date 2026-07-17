@@ -63,6 +63,13 @@ The allow-list is enforced on **both** the Application's namespace and its
 `spec.destination.namespace` (they can differ). A disallowed namespace returns
 `403`. The proxy endpoints also require the app-context header (`401` without it).
 
+The destination check applies once the Application resolves. If it cannot be resolved
+(Kubernetes API unavailable, or the app genuinely does not exist), the destination is
+unknown and the request degrades to a `warnings[]` entry with `status: degraded`
+rather than a `403` — a dependency failure must not masquerade as an authorization
+decision. RBAC still bounds any read that is actually attempted, so treat the
+destination allow-list as defence in depth on top of RBAC, not as the only boundary.
+
 **Splitting the two axes.** The Application CR often lives in a small fixed set of
 namespaces (`argocd`, `glueops-core`) while its workloads run in per-tenant
 `spec.destination.namespace`s. Enforcing one list against both would `403` every app
