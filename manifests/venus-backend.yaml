@@ -144,10 +144,9 @@ spec:
                     app.kubernetes.io/name: argocd-extension-backend-api
       containers:
         - name: argocd-extension-backend-api
-          # PREREQUISITE: this tag must exist before applying this manifest. As of
-          # this writing the only published tag is the malformed "v.0.0.1" -- cut a
-          # v0.1.1 release (or override this tag) or the pod will ImagePullBackOff.
-          # See README.md "Deploy".
+          # Keep in step with package.json's version and chart/values.yaml: the
+          # release workflow refuses to publish when the release tag and
+          # package.json disagree. Bump all three together.
           image: ghcr.io/glueops/argocd-extension-backend-api:v0.1.1
           imagePullPolicy: IfNotPresent
           securityContext:

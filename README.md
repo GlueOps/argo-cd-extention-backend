@@ -126,11 +126,10 @@ See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-en
 
 ## Deployment
 
-> **Prerequisite — the image tag must exist.** The chart and the raw manifests both
-> reference `v0.1.1`, matching `package.json`. At the time of writing the only
-> published tag is the malformed `v.0.0.1`, so a `v0.1.1` release must be cut first
-> (the release workflow verifies the tag matches `package.json`). Otherwise override
-> `image.tag` — without one of the two, the pod lands in `ImagePullBackOff`.
+The chart and the raw manifests both reference `ghcr.io/glueops/argocd-extension-backend-api:v0.1.1`,
+matching `package.json`. The release workflow refuses to publish when those disagree,
+so the image tag, SBOM and provenance always describe the same artifact — bump
+`package.json`, `chart/values.yaml` and both manifests together.
 
 The Helm chart under [`chart/`](chart/) is the source of truth (RBAC, securityContext,
 NetworkPolicy, PDB, probes are defined once and templated per environment):

@@ -20,8 +20,28 @@ env:
   tempoBaseUrl: ""
   grafanaBaseUrl: "https://grafana.nonprod.venus.onglueops.rocks"
   vaultBaseUrl: "https://vault.nonprod.venus.onglueops.rocks"
+  # MUST equal the repoURL of the Application source that its `$values` valueFiles
+  # reference, or the config-derived Vault links are silently dropped: the backend
+  # only reads value files from THIS repo (a confused-deputy guard -- otherwise it
+  # would send GITHUB_TOKEN to any repo an Application happens to name). Verify with:
+  #   kubectl get applications -n glueops-core -o json | \
+  #     jq -r '.items[].spec.sources[]? | select(.ref) | .repoURL' | sort -u
+  # On a captain/venus-shaped cluster this is the per-tenant configurations repo
+  # (e.g. development-tenant-venus/deployment-configurations), NOT this GlueOps one.
+  #
+  # The live-ExternalSecret path is independent of this and works regardless; only
+  # secrets derived by reading value files depend on it. That path additionally needs
+  # githubToken below when the repo is private.
   deploymentConfigRepoUrl: "https://github.com/GlueOps/deployment-configurations"
   argocdAppNamespaces: "argocd,glueops-core"
+
+# The tenant deployment-configurations repo is private, so reading value files from
+# it (for config-derived Vault links) requires a token. Without this, that path
+# returns nothing -- silently, since a failed read degrades to "no links".
+# Create the Secret first, then uncomment:
+# githubToken:
+#   existingSecretName: "argocd-extension-backend-api-github"
+#   existingSecretKey: "token"
 
 networkPolicy:
   enabled: true
