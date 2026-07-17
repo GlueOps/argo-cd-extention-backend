@@ -19,23 +19,33 @@ const server = require('../src/server');
 const { app, __setK8sClientsForTest } = server;
 
 // Applications keyed by name, all living in namespace `argocd` (the App-CR namespace).
-function appObj(name, destNamespace, resources) {
+// `project` is applied only when passed, so the undefined-project case (which the
+// header gate must normalize to "default") stays reachable.
+function appObj(name, destNamespace, resources, project) {
+  const spec = { destination: { namespace: destNamespace } };
+  if (project !== undefined) spec.project = project;
   return {
     metadata: { namespace: 'argocd', name },
-    spec: { destination: { namespace: destNamespace } },
+    spec,
     status: { resources: resources || [] }
   };
 }
 
+const WEB_IN_TENANT_B = [{ kind: 'Deployment', name: 'web', namespace: 'tenant-b' }];
+
 const APPS = {
-  'in-scope': appObj('in-scope', 'tenant-b', [{ kind: 'Deployment', name: 'web', namespace: 'tenant-b' }]),
+  'in-scope': appObj('in-scope', 'tenant-b', WEB_IN_TENANT_B),
   'out-of-scope': appObj('out-of-scope', 'tenant-c', [{ kind: 'Deployment', name: 'web', namespace: 'tenant-c' }]),
-  'padded-dest': appObj('padded-dest', '  tenant-b  ', [{ kind: 'Deployment', name: 'web', namespace: 'tenant-b' }]),
+  'padded-dest': appObj('padded-dest', '  tenant-b  ', WEB_IN_TENANT_B),
   // A resource in kube-system (outside the allowed dest namespace) must be filtered.
   'cross-ns': appObj('cross-ns', 'tenant-b', [
     { kind: 'Deployment', name: 'web', namespace: 'tenant-b' },
     { kind: 'Deployment', name: 'kube-dns', namespace: 'kube-system' }
-  ])
+  ]),
+  // Project-header gate fixtures.
+  'proj-team-a': appObj('proj-team-a', 'tenant-b', WEB_IN_TENANT_B, 'team-a'),
+  'proj-absent': appObj('proj-absent', 'tenant-b', WEB_IN_TENANT_B),
+  'proj-empty': appObj('proj-empty', 'tenant-b', WEB_IN_TENANT_B, '')
 };
 
 let httpServer, base;
@@ -63,8 +73,10 @@ before(async () => {
 
 after(() => new Promise(r => httpServer.close(r)));
 
-function links(appName) {
-  return fetch(`${base}/api/links`, { headers: { 'Argocd-Application-Name': `argocd:${appName}` } });
+function links(appName, projectName) {
+  const headers = { 'Argocd-Application-Name': `argocd:${appName}` };
+  if (projectName !== undefined) headers['Argocd-Project-Name'] = projectName;
+  return fetch(`${base}/api/links`, { headers });
 }
 
 test('app namespace outside ALLOWED_APP_NAMESPACES is 403 (app-axis gate)', async () => {
@@ -105,4 +117,46 @@ test('a status.resources namespace outside ALLOWED_DEST_NAMESPACES is filtered f
   const body = await res.json();
   const allLinkText = JSON.stringify(body);
   assert.ok(!allLinkText.includes('kube-system'), 'kube-system resource must not leak into any link/namespace');
+});
+
+// --- Argocd-Project-Name gate -------------------------------------------------
+// argocd-server sends spec.GetProject(), which returns "default" for an unset or
+// empty project. The gate must compare against that normalization, so an app stored
+// with no project (or "") does not spuriously 403 against the header's "default".
+
+test('Argocd-Project-Name matching the resolved app project is allowed (200)', async () => {
+  assert.equal((await links('proj-team-a', 'team-a')).status, 200);
+});
+
+test('Argocd-Project-Name mismatching the resolved app project is 403', async () => {
+  const res = await links('proj-team-a', 'team-b');
+  assert.equal(res.status, 403);
+  const body = await res.json();
+  assert.equal(body.errorType, 'forbidden');
+  assert.match(body.error, /does not match the resolved application project/);
+});
+
+test('an absent spec.project normalizes to "default" and does not 403 the default project', async () => {
+  assert.equal((await links('proj-absent', 'default')).status, 200);
+});
+
+test('an empty spec.project normalizes to "default" and does not 403 the default project', async () => {
+  assert.equal((await links('proj-empty', 'default')).status, 200);
+});
+
+test('the project gate only applies when Argo CD actually sends the header', async () => {
+  // No Argocd-Project-Name at all: the app resolves with project team-a and must
+  // still be served — the gate is defense in depth, not a required header.
+  assert.equal((await links('proj-team-a')).status, 200);
+});
+
+test('metrics links omit var-cluster entirely when CLUSTER_NAME is unset', async () => {
+  // An explicit `var-cluster=` would override the dashboard's own default selection;
+  // the single-cluster default must leave the template var alone.
+  const body = await (await links('in-scope')).json();
+  const metrics = body.categories.find(c => c.id === 'metrics');
+  assert.ok(metrics, 'expected a metrics category');
+  const url = metrics.links[0].url;
+  assert.ok(!url.includes('var-cluster'), `var-cluster must be absent, got ${url}`);
+  assert.ok(url.includes('var-namespace=tenant-b'), 'other template vars still render');
 });

@@ -329,7 +329,11 @@ function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
   if (!workloadName) return '';
   return buildGrafanaDashboardUrl(GRAFANA_METRICS_DASHBOARD, {
     'var-datasource': 'default',
-    'var-cluster': CLUSTER_NAME,
+    // Omit var-cluster entirely when CLUSTER_NAME is unset rather than emitting an
+    // empty `var-cluster=`: an explicit empty value overrides the dashboard's own
+    // default/current selection, whereas omitting the param leaves it alone. This is
+    // what makes the documented "leave unset for single-cluster Grafana" case work.
+    'var-cluster': CLUSTER_NAME || undefined,
     'var-namespace': namespace || '',
     'var-type': workloadType || 'deployment',
     'var-workload': workloadName,
