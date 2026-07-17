@@ -127,9 +127,9 @@ See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-en
 ## Deployment
 
 The chart and the raw manifests both reference `ghcr.io/glueops/argocd-extension-backend-api:v0.1.1`,
-matching `package.json`. The release workflow refuses to publish when those disagree,
-so the image tag, SBOM and provenance always describe the same artifact — bump
-`package.json`, `chart/values.yaml` and both manifests together.
+matching `package.json`. The release workflow refuses to publish unless the release tag,
+`package.json`, `chart/values.yaml` and both manifests all agree, so the image tag, SBOM
+and provenance always describe the same artifact — bump all four together.
 
 The Helm chart under [`chart/`](chart/) is the source of truth (RBAC, securityContext,
 NetworkPolicy, PDB, probes are defined once and templated per environment):
@@ -139,10 +139,10 @@ helm install argocd-extension-backend-api ./chart -n argocd -f chart/values-argo
 helm install argocd-extension-backend-api ./chart -n glueops-core -f chart/values-venus.yaml
 ```
 
-Both installs can share one cluster: RBAC object names are qualified with the release
-namespace, so the cluster-scoped `ClusterRole`/`ClusterRoleBinding` created by each do
-not collide. Keep the release name and namespace as shown, or the two installs will
-fight over the same cluster-scoped objects.
+Both installs can share one cluster: RBAC object names are built from the release name
+*and* the release namespace (see `argocd-extension-backend-api.rbacName`), so the
+cluster-scoped `ClusterRole`/`ClusterRoleBinding` created by each do not collide — any
+release name works, as long as the two installs go into different namespaces.
 
 The raw manifests in [`manifests/`](manifests/) are a self-contained fallback kept
 in sync with the chart.

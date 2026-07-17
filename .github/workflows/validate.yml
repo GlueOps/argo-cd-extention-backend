@@ -65,9 +65,15 @@ jobs:
           helm lint ./chart -f ./chart/values-venus.yaml
 
       # Render the chart with each environment's values and schema-validate the
-      # output. -strict rejects unknown/misplaced fields (the LabelSelector bug);
-      # -ignore-missing-schemas skips CRDs (Application/ExternalSecret) that have no
-      # published schema rather than failing on them.
+      # output. -strict rejects unknown/misplaced fields (the LabelSelector bug).
+      #
+      # -ignore-missing-schemas is deliberately NOT used: it skips *any* kind
+      # kubeconform can't resolve, so a typo'd `kind: Deployement` is reported as
+      # "skipped" and still exits 0 -- silently defeating the check this job exists
+      # for. Neither the chart nor the raw manifests emits a CRD instance today
+      # (kubeconform reports "Skipped: 0"), so nothing needs the escape hatch. If a
+      # CRD is ever templated here, name it explicitly with `-skip <Kind>` rather
+      # than reinstating the blanket flag.
       - name: Validate rendered chart
         run: |
           set -euo pipefail
@@ -75,13 +81,11 @@ jobs:
             echo "== rendering chart with $values =="
             helm template release ./chart -f "./chart/$values" \
               | kubeconform -strict -summary -verbose \
-                  -kubernetes-version "${KUBE_VERSION}" \
-                  -ignore-missing-schemas
+                  -kubernetes-version "${KUBE_VERSION}"
           done
 
       - name: Validate raw manifests
         run: |
           kubeconform -strict -summary -verbose \
             -kubernetes-version "${KUBE_VERSION}" \
-            -ignore-missing-schemas \
             manifests/argocd-backend.yaml manifests/venus-backend.yaml

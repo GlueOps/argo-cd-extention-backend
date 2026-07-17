@@ -2,7 +2,11 @@ name: Build and Release Backend
 
 on:
   release:
-    types: [created]
+    # `published`, NOT `created`: GitHub does not fire `created` for a release that
+    # was saved as a draft first, so the common draft-then-publish flow would publish
+    # a release with no image behind it and skip the version gate below entirely.
+    # `published` fires for both the direct and the draft-then-publish paths.
+    types: [published]
 
 # Least privilege: default every job to read-only; only the image-push job below
 # opts into packages: write.
@@ -42,6 +46,32 @@ jobs:
           fi
           echo "release tag and package.json agree: $pkg_version"
 
+      # The chart and the raw manifests pin the image tag independently of
+      # package.json, so the check above alone lets them go stale: bump package.json,
+      # cut v0.2.0, and the chart happily keeps deploying the v0.1.1 image with no
+      # error anywhere. README.md tells operators this workflow catches that, so
+      # actually check it rather than relying on all four files being bumped by hand.
+      - name: Chart and manifests pin the released image tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/glueops/argocd-extension-backend-api
+          fail=0
+          chart_tag="$(node -p "require('js-yaml').load(require('fs').readFileSync('chart/values.yaml','utf8')).image.tag")"
+          if [ "$chart_tag" != "$RELEASE_TAG" ]; then
+            echo "::error file=chart/values.yaml::image.tag is '$chart_tag' but the release is '$RELEASE_TAG'"
+            fail=1
+          fi
+          for m in manifests/argocd-backend.yaml manifests/venus-backend.yaml; do
+            if ! grep -qF "image: $image:$RELEASE_TAG" "$m"; then
+              echo "::error file=$m::does not pin $image:$RELEASE_TAG (found: $(grep -F "image: $image:" "$m" || echo none))"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "chart and manifests pin $image:$RELEASE_TAG"
+
   build-and-release:
     needs: test
     runs-on: ubuntu-latest
@@ -73,9 +103,20 @@ jobs:
           # Supply-chain attestations: SBOM + build provenance.
           sbom: true
           provenance: mode=max
+          # `latest` only moves for a real release. A pre-release (v0.2.0-rc.1) that
+          # claimed `latest` would silently become the default pull for every consumer
+          # that omits a tag -- and image-scan.yml's own reasoning depends on `latest`
+          # tracking the newest *supported* image.
+          #
+          # The condition is written as `!prerelease && <tag> || ''` rather than the
+          # more natural `prerelease && '' || <tag>`: GitHub's && / || yield an
+          # OPERAND, not a bool, and '' is falsy -- so the natural form collapses to
+          # `'' || <tag>` and emits `latest` for pre-releases too, i.e. exactly the
+          # bug it was meant to fix. Keep the truthy value in the left branch.
+          # build-push-action drops the resulting empty line from the tag list.
           tags: |
             ghcr.io/glueops/argocd-extension-backend-api:${{ github.event.release.tag_name }}
-            ghcr.io/glueops/argocd-extension-backend-api:latest
+            ${{ !github.event.release.prerelease && 'ghcr.io/glueops/argocd-extension-backend-api:latest' || '' }}
 
       # Image scanning lives in a separate, read-only workflow (image-scan.yml) so
       # Trivy and its transitive action deps never run in a job that holds the

@@ -48,8 +48,11 @@ if (LOG_LEVEL !== 'INFO' && LOG_LEVEL !== 'DEBUG') {
 
 const REQUEST_TIMEOUT_MS = requirePositiveInt('REQUEST_TIMEOUT_MS', 8000);
 assertInRange('REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS, 1, 2147483647);
-const PROMETHEUS_BASE_URL = (process.env.PROMETHEUS_BASE_URL || '').replace(/\/$/, '');
-const TEMPO_BASE_URL = (process.env.TEMPO_BASE_URL || '').replace(/\/$/, '');
+// Trim before the trailing-slash strip: a whitespace-padded value is otherwise
+// truthy at the `if (!PROMETHEUS_BASE_URL)` config check but blows up inside
+// buildUrl's `new URL()`, turning a config mistake into a per-request 502.
+const PROMETHEUS_BASE_URL = (process.env.PROMETHEUS_BASE_URL || '').trim().replace(/\/$/, '');
+const TEMPO_BASE_URL = (process.env.TEMPO_BASE_URL || '').trim().replace(/\/$/, '');
 const TEMPO_SEARCH_PATH = (process.env.TEMPO_SEARCH_PATH || '/api/search').trim();
 
 if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(TEMPO_SEARCH_PATH)) {
@@ -90,7 +93,21 @@ const GRAFANA_TRACES_DASHBOARD = (process.env.GRAFANA_TRACES_DASHBOARD || '').tr
 // clusters that share namespace/workload names (otherwise the link is ambiguous).
 const CLUSTER_NAME = (process.env.CLUSTER_NAME || '').trim();
 
-// Validate URLs are well-formed if provided
+// Validate URLs are well-formed if provided.
+// PROMETHEUS_BASE_URL/TEMPO_BASE_URL are the two that are actually dereferenced at
+// request time (buildUrl -> new URL()), so a malformed value here is worse than for
+// the link-only vars: it passes the `if (!X_BASE_URL)` config guard, then throws
+// inside the handler and is reported as a generic 502 "failed to reach the upstream".
+// That misattributes an operator config error to the upstream. Fail fast at boot
+// instead, matching the link-only vars below.
+if (PROMETHEUS_BASE_URL && !/^https?:\/\//.test(PROMETHEUS_BASE_URL)) {
+  console.error(`[FATAL] PROMETHEUS_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.PROMETHEUS_BASE_URL)}`);
+  process.exit(1);
+}
+if (TEMPO_BASE_URL && !/^https?:\/\//.test(TEMPO_BASE_URL)) {
+  console.error(`[FATAL] TEMPO_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.TEMPO_BASE_URL)}`);
+  process.exit(1);
+}
 if (GRAFANA_BASE_URL && !/^https?:\/\//.test(GRAFANA_BASE_URL)) {
   console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(GRAFANA_BASE_URL)}`);
   process.exit(1);
