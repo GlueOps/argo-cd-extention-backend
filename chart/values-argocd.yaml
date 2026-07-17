@@ -6,6 +6,18 @@
 # templates/rbac.yaml for why unbounded "*" (which forces a cluster-wide
 # workload/ExternalSecret list Role) is avoided here. The app requests NO
 # secrets/pods RBAC at all.
+#
+# Both namespace axes intentionally collapse onto this one list: this instance
+# serves only Applications that live in `argocd` AND deploy to `argocd`. That is
+# why allowedAppNamespaces/allowedDestNamespaces are deliberately NOT set here,
+# unlike values-venus.yaml where the two axes genuinely differ.
+#
+# Consequence, so it is not mistaken for the bug CONFIGURATION.md warns about: an
+# Application in `argocd` whose spec.destination.namespace is anything other than
+# `argocd` gets a 403 from the destination gate. That is the intended scope, not an
+# oversight. If this instance ever needs to serve apps that deploy elsewhere, split
+# the axes as values-venus.yaml does rather than widening this list -- widening it
+# also widens the app-CR gate and the namespaced RBAC Role.
 allowedNamespaces: "argocd"
 
 env:
