@@ -14,13 +14,26 @@ same change.
   anti-affinity or `topologySpreadConstraints`)
 - `Service` (ClusterIP, port 8000)
 - `ServiceAccount`
-- RBAC (`Role`/`RoleBinding` per allowed namespace, or `ClusterRole`/
-  `ClusterRoleBinding` if `allowedNamespaces: "*"` -- see the comments in
-  `templates/rbac.yaml` for the least-privilege rationale)
-- `NetworkPolicy` restricting ingress to the `argocd-server` pod(s)
-- `PodDisruptionBudget` (when `replicaCount > 1`)
+- RBAC, in two parts:
+  - a `ClusterRole`/`ClusterRoleBinding` granting `applications` get/list, which is
+    **always created and always cluster-wide**, regardless of `allowedNamespaces`.
+    `getArgoApplication()` falls back to a cluster-wide list, which no namespaced
+    Role can authorize. Argo CD Applications describe *what* is deployed (source,
+    destination), not secret material -- see `CONFIGURATION.md` for the full caveat.
+  - workload/ExternalSecret `list` access, scoped by `allowedDestNamespaces` (falling
+    back to `allowedNamespaces`): a `Role`/`RoleBinding` per namespace in that list,
+    or a `ClusterRole`/`ClusterRoleBinding` when it is `"*"`. Keep it bounded.
 
-See `values.yaml` for every configurable field and its default.
+  All RBAC object names are qualified with the release namespace, so installing this
+  chart into two namespaces on one cluster does not collide on cluster-scoped names.
+- `NetworkPolicy` restricting ingress to the `argocd-server` pod(s)
+- `PodDisruptionBudget` (when `replicaCount > 1`; `minAvailable` must be less than
+  `replicaCount` or the render fails, since equal values block node drains forever)
+
+See `values.yaml` for every configurable field and its default. Values documented as
+comma-separated lists (`allowedNamespaces`, `allowedAppNamespaces`,
+`allowedDestNamespaces`) and `image.tag` must be **strings** -- the chart fails the
+render with an actionable message rather than coercing a list or an unquoted `1.10`.
 
 ## Install per environment
 

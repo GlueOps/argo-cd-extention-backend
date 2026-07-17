@@ -1,8 +1,17 @@
 {{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+{{- /* A numeric minAvailable >= replicaCount permits zero voluntary disruptions
+       forever: `kubectl drain` on any node hosting a replica hangs, and
+       cluster-autoscaler scale-down and node upgrades stall on this namespace.
+       The enabled/replicaCount>1 guard above already rules out the 1/1 deadlock;
+       fail fast on the sibling case rather than shipping an undrainable PDB.
+       kindIs "int64" keeps percentage strings ("50%") working. */ -}}
+{{- if and (kindIs "int64" .Values.podDisruptionBudget.minAvailable) (ge (int .Values.podDisruptionBudget.minAvailable) (int .Values.replicaCount)) }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than replicaCount (%v), otherwise no voluntary disruption is ever permitted and node drains hang" .Values.podDisruptionBudget.minAvailable .Values.replicaCount) }}
+{{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "argocd-extension-backend-api.fullname" . }}
+  name: {{ include "argocd-extension-backend-api.fullname" . | quote }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "argocd-extension-backend-api.labels" . | nindent 4 }}

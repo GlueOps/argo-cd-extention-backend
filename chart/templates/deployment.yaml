@@ -1,7 +1,16 @@
+{{- include "argocd-extension-backend-api.assertString" (list "image.tag" .Values.image.tag) }}
+{{- include "argocd-extension-backend-api.assertString" (list "image.repository" .Values.image.repository) }}
+{{- /* These render into env vars the app parses as comma-separated lists. Assert them
+       here as well as in rbac.yaml: this Deployment renders even with rbac.create=false,
+       and `| quote` would otherwise coerce a mistyped list into ALLOWED_NAMESPACES="[a b]"
+       -- which the app splits into one bogus entry and then denies every namespace. */ -}}
+{{- include "argocd-extension-backend-api.assertString" (list "allowedNamespaces" .Values.allowedNamespaces) }}
+{{- include "argocd-extension-backend-api.assertString" (list "allowedAppNamespaces" (.Values.allowedAppNamespaces | default "")) }}
+{{- include "argocd-extension-backend-api.assertString" (list "allowedDestNamespaces" (.Values.allowedDestNamespaces | default "")) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "argocd-extension-backend-api.fullname" . }}
+  name: {{ include "argocd-extension-backend-api.fullname" . | quote }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "argocd-extension-backend-api.labels" . | nindent 4 }}
@@ -27,7 +36,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "argocd-extension-backend-api.serviceAccountName" . }}
+      serviceAccountName: {{ include "argocd-extension-backend-api.serviceAccountName" . | quote }}
       automountServiceAccountToken: true
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -136,8 +145,8 @@ spec:
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.githubToken.existingSecretName }}
-                  key: {{ .Values.githubToken.existingSecretKey }}
+                  name: {{ .Values.githubToken.existingSecretName | quote }}
+                  key: {{ .Values.githubToken.existingSecretKey | quote }}
             {{- end }}
           startupProbe:
             httpGet:

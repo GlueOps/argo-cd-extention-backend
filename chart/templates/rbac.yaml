@@ -1,11 +1,8 @@
 {{- if .Values.rbac.create }}
-{{- $fullname := include "argocd-extension-backend-api.fullname" . }}
 {{- $saName := include "argocd-extension-backend-api.serviceAccountName" . }}
+{{- $rbacName := include "argocd-extension-backend-api.rbacName" . }}
 {{- $labels := include "argocd-extension-backend-api.labels" . }}
-{{- /* Workload/ExternalSecret reads happen in the DESTINATION namespace, so the
-       namespaced Roles below are created there. Follow allowedDestNamespaces when
-       set, otherwise allowedNamespaces (the single-list default). */ -}}
-{{- $rbacNamespaces := .Values.allowedDestNamespaces | default .Values.allowedNamespaces }}
+{{- $rbacNamespaces := include "argocd-extension-backend-api.rbacNamespaces" . }}
 ---
 # -----------------------------------------------------------------------------
 # argoproj.io Applications: get + list, granted CLUSTER-WIDE (always).
@@ -23,7 +20,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $fullname }}-applications
+  name: {{ $rbacName }}-applications
   labels:
     {{- $labels | nindent 4 }}
 rules:
@@ -34,18 +31,18 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $fullname }}-applications
+  name: {{ $rbacName }}-applications
   labels:
     {{- $labels | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $fullname }}-applications
+  name: {{ $rbacName }}-applications
 subjects:
   - kind: ServiceAccount
-    name: {{ $saName }}
+    name: {{ $saName | quote }}
     namespace: {{ .Release.Namespace }}
-{{- if eq ($rbacNamespaces | toString | trim) "*" }}
+{{- if eq (trim $rbacNamespaces) "*" }}
 ---
 # -----------------------------------------------------------------------------
 # CLUSTER-WIDE RBAC NOTE
@@ -63,7 +60,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $fullname }}-workloads
+  name: {{ $rbacName }}-workloads
   labels:
     {{- $labels | nindent 4 }}
 rules:
@@ -77,19 +74,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $fullname }}-workloads
+  name: {{ $rbacName }}-workloads
   labels:
     {{- $labels | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $fullname }}-workloads
+  name: {{ $rbacName }}-workloads
 subjects:
   - kind: ServiceAccount
-    name: {{ $saName }}
+    name: {{ $saName | quote }}
     namespace: {{ .Release.Namespace }}
 {{- else }}
-{{- range $ns := ($rbacNamespaces | toString | splitList ",") }}
+{{- range $ns := (splitList "," $rbacNamespaces) }}
 {{- $ns := trim $ns }}
 {{- /* Skip empty entries and a stray "*" list item (a namespace literally named
        "*" is invalid; a bare "*" would have taken the ClusterRole branch above). */ -}}
@@ -106,7 +103,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ $fullname }}-workloads
+  name: {{ $rbacName }}-workloads
   namespace: {{ $ns | quote }}
   labels:
     {{- $labels | nindent 4 }}
@@ -121,17 +118,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ $fullname }}-workloads
+  name: {{ $rbacName }}-workloads
   namespace: {{ $ns | quote }}
   labels:
     {{- $labels | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ $fullname }}-workloads
+  name: {{ $rbacName }}-workloads
 subjects:
   - kind: ServiceAccount
-    name: {{ $saName }}
+    name: {{ $saName | quote }}
     namespace: {{ $.Release.Namespace }}
 {{- end }}
 {{- end }}

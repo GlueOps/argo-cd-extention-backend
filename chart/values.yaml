@@ -12,7 +12,7 @@ image:
   # "v.0.0.1". This chart defaults to "v0.1.1" (matching package.json's
   # version) on the assumption that a properly tagged v0.1.1 image will be
   # released before this chart is installed. Override image.tag if not.
-  tag: v0.1.1
+  tag: "v0.1.1"
   pullPolicy: IfNotPresent
 
 # - name: ghcr-pull-secret
