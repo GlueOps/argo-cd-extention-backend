@@ -1,12 +1,34 @@
 {{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
-{{- /* A numeric minAvailable >= replicaCount permits zero voluntary disruptions
-       forever: `kubectl drain` on any node hosting a replica hangs, and
-       cluster-autoscaler scale-down and node upgrades stall on this namespace.
-       The enabled/replicaCount>1 guard above already rules out the 1/1 deadlock;
-       fail fast on the sibling case rather than shipping an undrainable PDB.
-       kindIs "int64" keeps percentage strings ("50%") working. */ -}}
-{{- if and (kindIs "int64" .Values.podDisruptionBudget.minAvailable) (ge (int .Values.podDisruptionBudget.minAvailable) (int .Values.replicaCount)) }}
-{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than replicaCount (%v), otherwise no voluntary disruption is ever permitted and node drains hang" .Values.podDisruptionBudget.minAvailable .Values.replicaCount) }}
+{{- /* A minAvailable >= replicaCount permits zero voluntary disruptions forever:
+       `kubectl drain` on any node hosting a replica hangs, and cluster-autoscaler
+       scale-down and node upgrades stall on this namespace. The enabled/
+       replicaCount>1 guard above already rules out the 1/1 deadlock; fail fast on
+       the sibling case rather than shipping an undrainable PDB.
+
+       Validate by SHAPE, not by Go kind. The previous guard was
+       `and (kindIs "int64" .minAvailable) (ge (int .minAvailable) (int .replicaCount))`,
+       and `kindIs "int64"` made it near-dead code: Helm parses a values FILE via JSON,
+       so `minAvailable: 2` in values.yaml is a float64, not an int64. The guard
+       therefore never fired for the normal path -- only for `--set`. It also exempted
+       `minAvailable: "2"` (a string; this chart's own house style quotes numbers, cf.
+       values.yaml requestTimeoutMs: "8000") and `"100%"` (not a typo at all, but the
+       deliberately supported percentage form). Every one of those still renders raw
+       below for YAML to re-parse as a number, i.e. produced exactly the undrainable
+       PDB this check exists to prevent.
+
+       assertIntegral is type-agnostic (see _helpers.tpl) and `int` normalizes
+       float64/int64/"2" alike, so the comparison now covers every non-percentage
+       form. Percentages are range-checked against 100% in their own branch. */ -}}
+{{- $minAvailable := .Values.podDisruptionBudget.minAvailable }}
+{{- if and (kindIs "string" $minAvailable) (hasSuffix "%" $minAvailable) }}
+{{- if ge (int (trimSuffix "%" $minAvailable)) 100 }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than 100%%, otherwise no voluntary disruption is ever permitted and node drains hang" $minAvailable) }}
+{{- end }}
+{{- else }}
+{{- include "argocd-extension-backend-api.assertIntegral" (list "podDisruptionBudget.minAvailable" $minAvailable) }}
+{{- if ge (int $minAvailable) (int .Values.replicaCount) }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than replicaCount (%v), otherwise no voluntary disruption is ever permitted and node drains hang" $minAvailable .Values.replicaCount) }}
+{{- end }}
 {{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget

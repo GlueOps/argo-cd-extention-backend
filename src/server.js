@@ -60,9 +60,15 @@ if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(TEMPO_SEARCH_PATH)) {
   process.exit(1);
 }
 
-const GRAFANA_BASE_URL = (process.env.GRAFANA_BASE_URL || '').replace(/\/$/, '');
-const VAULT_BASE_URL = (process.env.VAULT_BASE_URL || '').replace(/\/$/, '');
-const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || '').replace(/\/$/, '');
+// Trim before the trailing-slash strip, for the same reason as PROMETHEUS/TEMPO
+// above. The `^https?://` checks below are not anchored at the end, so a TRAILING
+// space passes them while a leading one fatals — the padded value then survives to
+// be concatenated into links ("https://vault.example.com /ui/...") and, worse, to be
+// compared against an Application's repoURL, where the mismatch silently drops every
+// config-derived Vault link instead of erroring.
+const GRAFANA_BASE_URL = (process.env.GRAFANA_BASE_URL || '').trim().replace(/\/$/, '');
+const VAULT_BASE_URL = (process.env.VAULT_BASE_URL || '').trim().replace(/\/$/, '');
+const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || '').trim().replace(/\/$/, '');
 const CONFIG_REPO_LOCAL_ROOT = (process.env.CONFIG_REPO_LOCAL_ROOT || '').trim();
 const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
@@ -108,16 +114,19 @@ if (TEMPO_BASE_URL && !/^https?:\/\//.test(TEMPO_BASE_URL)) {
   console.error(`[FATAL] TEMPO_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.TEMPO_BASE_URL)}`);
   process.exit(1);
 }
+// Report the RAW env value, not the trimmed/stripped one: echoing the processed
+// value hides the very characters that caused the rejection (" https://x" reads back
+// as "https://x", which looks valid).
 if (GRAFANA_BASE_URL && !/^https?:\/\//.test(GRAFANA_BASE_URL)) {
-  console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(GRAFANA_BASE_URL)}`);
+  console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.GRAFANA_BASE_URL)}`);
   process.exit(1);
 }
 if (VAULT_BASE_URL && !/^https?:\/\//.test(VAULT_BASE_URL)) {
-  console.error(`[FATAL] VAULT_BASE_URL must be an http(s) URL, got: ${JSON.stringify(VAULT_BASE_URL)}`);
+  console.error(`[FATAL] VAULT_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.VAULT_BASE_URL)}`);
   process.exit(1);
 }
 if (DEPLOYMENT_CONFIG_REPO_URL && !/^https?:\/\//.test(DEPLOYMENT_CONFIG_REPO_URL)) {
-  console.error(`[FATAL] DEPLOYMENT_CONFIG_REPO_URL must be an http(s) URL, got: ${JSON.stringify(DEPLOYMENT_CONFIG_REPO_URL)}`);
+  console.error(`[FATAL] DEPLOYMENT_CONFIG_REPO_URL must be an http(s) URL, got: ${JSON.stringify(process.env.DEPLOYMENT_CONFIG_REPO_URL)}`);
   process.exit(1);
 }
 

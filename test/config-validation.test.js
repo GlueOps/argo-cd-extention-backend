@@ -55,3 +55,29 @@ test('a well-formed http(s) base URL boots cleanly', () => {
   assert.doesNotMatch(res.stderr, /\[FATAL\]/);
   assert.match(res.stdout, /\[CONFIG\]/);
 });
+
+// The link-only base URLs are the siblings of PROMETHEUS/TEMPO above and were the
+// last three without a trim. The `^https?://` check is not anchored at the end, so a
+// LEADING space fatals while a TRAILING one passes -- and the padded value then
+// reaches the string concatenations that build every link.
+['GRAFANA_BASE_URL', 'VAULT_BASE_URL', 'DEPLOYMENT_CONFIG_REPO_URL'].forEach(name => {
+  test(`${name} without a scheme is rejected at boot`, () => {
+    const res = boot({ [name]: 'example.com' });
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, new RegExp(`\\[FATAL\\] ${name} must be an http\\(s\\) URL`));
+  });
+
+  test(`${name} tolerates surrounding whitespace`, () => {
+    const res = boot({ [name]: '  https://example.com  ' });
+    assert.doesNotMatch(res.stderr, /\[FATAL\]/);
+    assert.match(res.stdout, /\[CONFIG\]/);
+  });
+
+  // The rejection message must echo the RAW value: reporting the trimmed one would
+  // print back a string that looks perfectly valid.
+  test(`${name} rejection reports the raw value, padding included`, () => {
+    const res = boot({ [name]: ' example.com ' });
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /got: " example\.com "/);
+  });
+});

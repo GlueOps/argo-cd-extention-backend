@@ -7,6 +7,12 @@
 {{- include "argocd-extension-backend-api.assertString" (list "allowedNamespaces" .Values.allowedNamespaces) }}
 {{- include "argocd-extension-backend-api.assertString" (list "allowedAppNamespaces" (.Values.allowedAppNamespaces | default "")) }}
 {{- include "argocd-extension-backend-api.assertString" (list "allowedDestNamespaces" (.Values.allowedDestNamespaces | default "")) }}
+{{- /* replicaCount is consumed twice: rendered raw below, and compared via `int` in
+       poddisruptionbudget.yaml. sprig's `int` returns 0 for an unparseable string, so
+       `replicaCount: "abc"` made that template's `gt (int .Values.replicaCount) 1`
+       false and SILENTLY dropped the PDB -- no error, no PDB, availability guarantee
+       quietly gone. Assert here so a mistyped value fails the render instead. */ -}}
+{{- include "argocd-extension-backend-api.assertIntegral" (list "replicaCount" .Values.replicaCount) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

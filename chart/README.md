@@ -27,8 +27,11 @@ same change.
   All RBAC object names are qualified with the release namespace, so installing this
   chart into two namespaces on one cluster does not collide on cluster-scoped names.
 - `NetworkPolicy` restricting ingress to the `argocd-server` pod(s)
-- `PodDisruptionBudget` (when `replicaCount > 1`; `minAvailable` must be less than
-  `replicaCount` or the render fails, since equal values block node drains forever)
+- `PodDisruptionBudget` (when `replicaCount > 1`). `minAvailable` must be less than
+  `replicaCount` -- or, in the percentage form (`"50%"`), less than `100%` -- since a
+  value that spares every replica blocks node drains forever. The render fails with an
+  actionable message otherwise, for the integer, quoted-integer and percentage forms
+  alike.
 
 See `values.yaml` for every configurable field and its default. Values documented as
 comma-separated lists (`allowedNamespaces`, `allowedAppNamespaces`,
