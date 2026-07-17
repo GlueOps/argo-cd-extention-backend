@@ -5,7 +5,7 @@ backend:
           - 'server.js'
           - 'package.json'
           - 'package-lock.json'
-          - 'test-links.js'
+          - 'test/**'
 
 docker:
   - changed-files:
@@ -22,6 +22,7 @@ deployment:
   - changed-files:
       - any-glob-to-any-file:
           - 'manifests/**'
+          - 'chart/**'
 
 documentation:
   - changed-files:

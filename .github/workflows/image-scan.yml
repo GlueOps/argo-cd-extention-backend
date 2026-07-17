@@ -31,10 +31,23 @@ jobs:
       - name: Scan image for vulnerabilities
         uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
         with:
-          # The release always pushes :latest alongside the tag; scan that.
-          image-ref: ghcr.io/glueops/argocd-extension-backend-api:latest
+          # Scan the immutable release tag, NOT :latest. :latest is a moving pointer
+          # that the next release (or a hotfix cut from an older branch) overwrites,
+          # so scanning it can report on a different image than the run that triggered
+          # this one -- attributing a verdict to the wrong build. workflow_run exposes
+          # the triggering run's ref as head_branch, which for a release build is the
+          # release tag.
+          image-ref: ghcr.io/glueops/argocd-extension-backend-api:${{ github.event.workflow_run.head_branch }}
           format: 'table'
           # Surface fixable critical CVEs as a failed check.
+          #
+          # Deliberately CRITICAL-only, not CRITICAL,HIGH: the base image's bundled
+          # npm currently vendors undici 6.26.0 (CVE-2026-12151, HIGH, fixable), which
+          # no lockfile change here can address -- the app itself never invokes npm at
+          # runtime and Node's own built-in undici (7.28.0) is already patched. Adding
+          # HIGH today would make this gate fail on every release for a package the
+          # container never executes, and a permanently-red gate gets muted and then
+          # gates nothing. Revisit once the base image ships a patched npm.
           exit-code: '1'
           ignore-unfixed: true
           severity: 'CRITICAL'
