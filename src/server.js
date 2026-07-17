@@ -590,12 +590,15 @@ function buildConfigRepoLinks(appObj) {
     return Array.from(uniq.values());
   }
 
-  const direct = sources.find(source => source && typeof source === 'object' && typeof source.repoURL === 'string' && typeof source.path === 'string' && source.path.trim() !== '' && source.path.trim() !== '.');
+  // Same traversal guard as the valueFiles case above: a `spec.source.path` of
+  // "../other-tenant" must not render a hyperlink escaping the app's subdirectory.
+  const direct = sources.find(source => source && typeof source === 'object' && typeof source.repoURL === 'string' && typeof source.path === 'string' && source.path.trim() !== '.' && isSafeRepoRelativePath(source.path.trim()));
   if (!direct) return [];
+  const directPath = direct.path.trim();
   const revision = typeof direct.targetRevision === 'string' && direct.targetRevision.trim() !== '' ? direct.targetRevision : 'main';
-  const url = buildGitTreeUrl(direct.repoURL, revision, direct.path);
+  const url = buildGitTreeUrl(direct.repoURL, revision, directPath);
   if (!url) return [];
-  return [{ label: `Config (${direct.path})`, url }];
+  return [{ label: `Config (${directPath})`, url }];
 }
 
 // From a list of Application objects (as returned by per-namespace GETs), pick the
@@ -1149,9 +1152,6 @@ app.get('/api/links', asyncHandler(async (req, res) => {
   if (isRemoteDestination) {
     warnings.push('application targets a remote cluster; live secret discovery is unavailable');
   }
-  if (!appObj) {
-    warnings.push('the Argo CD Application could not be resolved; results may be incomplete');
-  }
 
   return res.status(200).json({
     status: warnings.length > 0 ? 'degraded' : 'ok',
@@ -1348,6 +1348,7 @@ module.exports = {
   buildGitTreeUrl,
   buildVaultSecretUrl,
   isSafeRepoRelativePath,
+  buildConfigRepoLinks,
   collectAppSpecificValueFiles,
   __setK8sClientsForTest
 };

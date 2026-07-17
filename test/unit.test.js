@@ -20,6 +20,7 @@ const {
   buildVaultSecretUrl,
   isNamespaceAllowed,
   isSafeRepoRelativePath,
+  buildConfigRepoLinks,
   collectAppSpecificValueFiles
 } = require('../src/server');
 
@@ -241,4 +242,24 @@ test('collectAppSpecificValueFiles only returns files from DEPLOYMENT_CONFIG_REP
     }
   };
   assert.deepEqual(collectAppSpecificValueFiles(appObj), []);
+});
+
+test('buildConfigRepoLinks applies the traversal guard to the direct spec.source.path fallback', () => {
+  const link = (sourcePath) => buildConfigRepoLinks({
+    spec: { source: { repoURL: 'https://github.com/glueops/app', targetRevision: 'main', path: sourcePath } }
+  });
+
+  // A traversal in spec.source.path must not render an escaping hyperlink, same as
+  // the valueFiles case.
+  assert.deepEqual(link('apps/team-a/../team-b'), []);
+  assert.deepEqual(link('../secrets'), []);
+  assert.deepEqual(link('/etc/passwd'), []);
+  assert.deepEqual(link('apps\\team-a'), []);
+
+  // A safe path still links, and surrounding whitespace is trimmed off both the
+  // label and the URL.
+  assert.deepEqual(link('  apps/team-a  '), [{
+    label: 'Config (apps/team-a)',
+    url: 'https://github.com/glueops/app/tree/main/apps/team-a'
+  }]);
 });
