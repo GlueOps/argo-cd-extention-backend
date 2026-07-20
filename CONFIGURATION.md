@@ -21,6 +21,51 @@ the workload discovered for the application — not by ad-hoc dashboard names.
 Set `CLUSTER_NAME` when a single Grafana serves multiple clusters that share
 namespace/workload names, so the metrics `var-cluster` is unambiguous.
 
+#### Grafana Drilldown apps
+
+Newer Grafana ships Logs/Metrics/Traces **Drilldown** as app plugins, served from
+`/a/<plugin-id>/...` rather than as classic `/d/<uid>` dashboards. Supplying a
+datasource UID below switches that signal to its Drilldown app; leaving it unset
+keeps the classic dashboard from the table above.
+
+| Signal | Env (default) | Plugin | Workload filter |
+| --- | --- | --- | --- |
+| Logs | `GRAFANA_LOKI_DS_UID` (unset) | `grafana-lokiexplore-app` | `var-primary_label=service_name\|=~\|<workload>.*` |
+| Metrics | `GRAFANA_PROMETHEUS_DS_UID` (unset) | `grafana-metricsdrilldown-app` | repeated `var-filters`: `namespace\|=\|<ns>`, `pod\|=~\|<workload>.*` |
+| Traces | `GRAFANA_TEMPO_DS_UID` (unset) | `grafana-exploretraces-app` | `var-filters=resource.service.name\|=\|<workload>` |
+
+These are **datasource** UIDs, not dashboard UIDs, and they default to unset on
+purpose: the plugins only exist on clusters running the OTEL monitoring stack, so
+defaulting them on would emit 404 links everywhere else.
+
+Two things worth knowing before setting them:
+
+- **Loki's UID is per-cluster.** Unlike Prometheus and Tempo, the Loki datasource is
+  not provisioned with an explicit `uid`, so Grafana generates a different one on
+  every cluster. Read the real value from *Connections → Data sources → Loki* (it is
+  in the page URL). There is no correct shared default.
+- **Logs match on a prefix regex.** Loki's indexed labels here are
+  `k8s_container_name` / `k8s_pod_name` / `service_name` — there is no namespace
+  label, so logs cannot be namespace-scoped. `service_name` is also not always the
+  bare workload name (e.g. `keda-demo-rabbitmq` appears as
+  `keda-demo-rabbitmq-d7b47c79`), which is why the filter is `=~ <workload>.*`
+  rather than an exact match.
+
+#### Platform dashboards
+
+Dashboards shipped alongside the OTEL monitoring stack, surfaced as a `Dashboards`
+category. Each is independent — an unset UID drops just that link.
+
+| Env (default) | Dashboard | Keyed on |
+| --- | --- | --- |
+| `GRAFANA_APM_DASHBOARD` (unset) | APM Overview | `var-app=<workload>` |
+| `GRAFANA_K8S_OVERVIEW_DASHBOARD` (unset) | Kubernetes Overview | `var-namespace=<ns>` |
+| `GRAFANA_K8S_POD_DASHBOARD` (unset) | Kubernetes POD Overview | `var-namespace=<ns>`, `var-workload=<workload>` |
+
+`var-pod` is deliberately not sent for POD Overview: it is a single-value query
+variable resolving to a concrete pod name, so a regex or a stale pod name selects
+nothing. Leaving it unset lets the dashboard pick a live pod from the workload.
+
 ### 2. Vault secrets
 
 **Env:** `VAULT_BASE_URL`.

@@ -6,7 +6,7 @@ description: >-
   extension's data plane.
 type: application
 version: 0.1.0
-appVersion: "0.1.1"
+appVersion: "0.1.2"
 home: https://github.com/GlueOps/argo-cd-extention-backend
 sources:
   - https://github.com/GlueOps/argo-cd-extention-backend

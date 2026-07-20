@@ -94,6 +94,34 @@ const GRAFANA_METRICS_DASHBOARD = (process.env.GRAFANA_METRICS_DASHBOARD || 'a16
 // traces dashboard UID to get a real dashboard link; otherwise traces falls back to Explore.
 const GRAFANA_TRACES_DASHBOARD = (process.env.GRAFANA_TRACES_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
 
+// --- Grafana Drilldown apps -------------------------------------------------
+// Grafana ships Logs/Metrics/Traces Drilldown as *app plugins*, served under
+// /a/<plugin-id>/... rather than as classic /d/<uid> dashboards. When the
+// datasource UID for a signal is configured below, that signal links to its
+// Drilldown app; otherwise it falls back to the classic dashboard above, so a
+// cluster that has not rolled out the plugins keeps working.
+//
+// These are datasource UIDs, NOT dashboard UIDs. All default to EMPTY, which is
+// deliberate: the Drilldown plugins are only present on clusters running the OTEL
+// monitoring stack, and a /a/<plugin>/ link on a cluster without the plugin is a
+// 404. Defaulting these on would break every cluster that has not rolled it out,
+// so each signal opts in by being told its datasource UID (the platform chart
+// supplies them). Unset => that signal keeps using its classic dashboard.
+//
+// Loki additionally CANNOT be defaulted even if we wanted to: unlike Prometheus
+// ("prometheus") and Tempo, its datasource is not provisioned with an explicit uid
+// in the monitoring chart, so Grafana auto-generates a different one per cluster.
+const GRAFANA_LOKI_DS_UID = (process.env.GRAFANA_LOKI_DS_UID || '').trim();
+const GRAFANA_PROMETHEUS_DS_UID = (process.env.GRAFANA_PROMETHEUS_DS_UID || '').trim();
+const GRAFANA_TEMPO_DS_UID = (process.env.GRAFANA_TEMPO_DS_UID || '').trim();
+
+// Platform dashboards added alongside the OTEL monitoring stack. Empty by default
+// for the same reason as above -- older clusters do not have them. An unset UID
+// drops just that one link. Values are dashboard UIDs.
+const GRAFANA_APM_DASHBOARD = (process.env.GRAFANA_APM_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
+const GRAFANA_K8S_OVERVIEW_DASHBOARD = (process.env.GRAFANA_K8S_OVERVIEW_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
+const GRAFANA_K8S_POD_DASHBOARD = (process.env.GRAFANA_K8S_POD_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
+
 // Optional cluster identifier for the metrics dashboard's `var-cluster` template var.
 // Leave unset for single-cluster Grafana; set it when one Grafana serves multiple
 // clusters that share namespace/workload names (otherwise the link is ambiguous).
@@ -339,9 +367,56 @@ function buildGrafanaDashboardUrl(dashboardPath, vars) {
   return `${GRAFANA_BASE_URL}/d/${dashboardPath}${query ? `?${query}` : ''}`;
 }
 
-// Loki "workload logs" dashboard, keyed by workload name (matches the platform dashboard).
+// Escape regex metacharacters so a workload name is matched literally inside the
+// `=~` operators used by the Drilldown apps. Kubernetes names are normally
+// [a-z0-9-] but this must not depend on that.
+function escapeRegexLiteral(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Build a Grafana app-plugin (Drilldown) URL: /a/<plugin>/<view>?<params>.
+function buildGrafanaAppUrl(pluginId, view, params) {
+  if (!GRAFANA_BASE_URL || !pluginId) return '';
+  const search = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null) return;
+    // Repeat the key for array values -- Drilldown reads multi-valued filters as
+    // repeated params, not comma-joined ones.
+    (Array.isArray(value) ? value : [value]).forEach(v => search.append(key, String(v)));
+  });
+  const query = search.toString();
+  return `${GRAFANA_BASE_URL}/a/${pluginId}/${view}${query ? `?${query}` : ''}`;
+}
+
+// Logs: Grafana Logs Drilldown when the Loki datasource UID is configured, else the
+// classic workload-logs dashboard.
+//
+// Keyed on `service_name`, the only workload-identifying label Loki carries here
+// (its label set is k8s_container_name / k8s_pod_name / service_name -- notably no
+// namespace, so logs cannot be namespace-scoped). Matched with `=~` and a trailing
+// `.*` because service_name is not always exactly the workload name: some workloads
+// surface with a generated suffix (e.g. keda-demo-rabbitmq -> keda-demo-rabbitmq-d7b47c79),
+// which an exact `=` match would miss entirely.
 function buildGrafanaLogsUrl(workloadName) {
   if (!workloadName) return '';
+  if (GRAFANA_LOKI_DS_UID) {
+    return buildGrafanaAppUrl('grafana-lokiexplore-app', 'explore', {
+      patterns: '[]',
+      from: 'now-15m',
+      to: 'now',
+      timezone: 'browser',
+      'var-ds': GRAFANA_LOKI_DS_UID,
+      'var-filters': '',
+      'var-fields': '',
+      'var-levels': '',
+      'var-metadata': '',
+      'var-all-fields': '',
+      'var-patterns': '',
+      'var-lineFilterV2': '',
+      'var-lineFilters': '',
+      'var-primary_label': `service_name|=~|${escapeRegexLiteral(workloadName)}.*`
+    });
+  }
   return buildGrafanaDashboardUrl(GRAFANA_LOGS_DASHBOARD, {
     orgId: '1',
     'var-workload': workloadName,
@@ -353,6 +428,32 @@ function buildGrafanaLogsUrl(workloadName) {
 // workload type (deployment/statefulset/daemonset) and workload name.
 function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
   if (!workloadName) return '';
+  if (GRAFANA_PROMETHEUS_DS_UID) {
+    // Metrics Drilldown reads adhoc label filters from repeated `var-filters`
+    // params in `<label>|<op>|<value>` form. Scope to the namespace (exact) and
+    // the workload's pods (prefix regex -- pod names carry replicaset/ordinal
+    // suffixes, so an exact match would select nothing).
+    const filters = [];
+    if (namespace) filters.push(`namespace|=|${namespace}`);
+    filters.push(`pod|=~|${escapeRegexLiteral(workloadName)}.*`);
+    return buildGrafanaAppUrl('grafana-metricsdrilldown-app', 'drilldown', {
+      from: 'now-1h',
+      to: 'now',
+      timezone: 'browser',
+      'var-ds': GRAFANA_PROMETHEUS_DS_UID,
+      'var-filters': filters,
+      'var-metrics_filters': '',
+      'var-other_metric_filters': '',
+      'var-labelsWingman': '(none)',
+      'var-metrics-reducer-sort-by': 'default',
+      layout: 'grid',
+      'filters-rule': '',
+      'filters-prefix': '',
+      'filters-suffix': '',
+      'filters-recent': '',
+      search_txt: ''
+    });
+  }
   return buildGrafanaDashboardUrl(GRAFANA_METRICS_DASHBOARD, {
     'var-datasource': 'default',
     // Omit var-cluster entirely when CLUSTER_NAME is unset rather than emitting an
@@ -372,6 +473,26 @@ function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
 // falls back to the previous Grafana Explore URL so the category is never missing.
 function buildGrafanaTracesUrl(namespace, workloadName) {
   if (!GRAFANA_BASE_URL || !workloadName) return '';
+  if (GRAFANA_TEMPO_DS_UID) {
+    // Traces Drilldown. `nestedSetParent<0` is the plugin's own encoding for
+    // "root spans only" -- it is a fixed signal selector, not a workload filter.
+    // The workload filter is the resource attribute the view groups by.
+    return buildGrafanaAppUrl('grafana-exploretraces-app', 'explore', {
+      from: 'now-30m',
+      to: 'now',
+      timezone: 'browser',
+      'var-ds': GRAFANA_TEMPO_DS_UID,
+      'var-primarySignal': 'nestedSetParent<0',
+      'var-filters': `resource.service.name|=|${workloadName}`,
+      'var-metric': 'rate',
+      'var-groupBy': 'resource.service.name',
+      'var-spanListColumns': '',
+      'var-latencyThreshold': '',
+      'var-partialLatencyThreshold': '',
+      'var-durationPercentiles': '0.9',
+      actionView: 'breakdown'
+    });
+  }
   if (GRAFANA_TRACES_DASHBOARD) {
     return buildGrafanaDashboardUrl(GRAFANA_TRACES_DASHBOARD, {
       orgId: '1',
@@ -386,6 +507,60 @@ function buildGrafanaTracesUrl(namespace, workloadName) {
     'var-service': workloadName
   });
   return `${GRAFANA_BASE_URL}/explore?${params.toString()}`;
+}
+
+// Platform dashboards shipped with the OTEL monitoring stack. Each entry keys the
+// dashboard on the template variables that dashboard actually declares -- passing a
+// var a dashboard does not define is ignored by Grafana, but passing the wrong one
+// silently leaves the dashboard on its default selection, which reads as "no data".
+//
+//   APM Overview            (opentelemetry-apm)  var-app       <- label_values(service_name)
+//   Kubernetes Overview     (ee58kcteeir5sf)     var-namespace
+//   Kubernetes POD Overview (ce60j8f8umhhcc)     var-namespace, var-workload
+//
+// Verified against the live dashboards: APM's var-app resolves from Prometheus
+// label_values(service_name), and POD Overview's var-workload resolves from
+// label_values(kube_pod_labels, label_app_kubernetes_io_name) -- both of which
+// carry the workload name verbatim on this platform.
+function buildPlatformDashboardLinks(namespace, workloadName) {
+  if (!GRAFANA_BASE_URL) return [];
+  const links = [];
+
+  if (GRAFANA_APM_DASHBOARD && workloadName) {
+    const url = buildGrafanaDashboardUrl(GRAFANA_APM_DASHBOARD, {
+      orgId: '1',
+      'var-app': workloadName
+    });
+    if (url) links.push({ url, label: 'APM Overview' });
+  }
+
+  if (GRAFANA_K8S_OVERVIEW_DASHBOARD && namespace) {
+    const url = buildGrafanaDashboardUrl(GRAFANA_K8S_OVERVIEW_DASHBOARD, {
+      orgId: '1',
+      'var-namespace': namespace
+    });
+    if (url) links.push({ url, label: 'Kubernetes Overview' });
+  }
+
+  if (GRAFANA_K8S_POD_DASHBOARD && workloadName) {
+    const url = buildGrafanaDashboardUrl(GRAFANA_K8S_POD_DASHBOARD, {
+      orgId: '1',
+      'var-datasource': GRAFANA_PROMETHEUS_DS_UID || 'default',
+      // This dashboard declares var-cluster as a query variable; omit it rather
+      // than sending an empty value, which would override its own default.
+      'var-cluster': CLUSTER_NAME || undefined,
+      'var-namespace': namespace || '',
+      'var-workload': workloadName
+      // var-pod is deliberately NOT set. It is a single-value query variable
+      // resolving to a concrete pod name
+      // (label_values(kube_pod_labels{label_app_kubernetes_io_name="$workload"}, pod)),
+      // so a regex or a stale pod name selects nothing. Leaving it unset lets the
+      // dashboard pick a live pod from the workload we did select.
+    });
+    if (url) links.push({ url, label: 'Kubernetes POD Overview' });
+  }
+
+  return links;
 }
 
 function labelFromSecretPath(secretPath) {
@@ -1138,6 +1313,18 @@ app.get('/api/links', asyncHandler(async (req, res) => {
     if (metricsLinks.length > 0) {
       categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: workloadStatus, links: metricsLinks });
     }
+
+    // Platform dashboards. One workload yields one set of dashboard links; with
+    // several workloads the label is qualified so two workloads' "APM Overview"
+    // entries stay distinguishable in the dropdown.
+    const multipleWorkloads = workloads.length > 1;
+    const dashboardLinks = workloads.flatMap(w =>
+      buildPlatformDashboardLinks(w.namespace || destinationNamespace, w.name)
+        .map(link => ({ ...link, label: multipleWorkloads ? `${link.label} — ${w.name}` : link.label }))
+    );
+    if (dashboardLinks.length > 0) {
+      categories.push({ id: 'dashboards', label: 'Dashboards', icon: '📊', status: workloadStatus, links: dashboardLinks });
+    }
   }
 
   if (VAULT_BASE_URL) {
@@ -1380,5 +1567,10 @@ module.exports = {
   isSafeRepoRelativePath,
   buildConfigRepoLinks,
   collectAppSpecificValueFiles,
+  buildGrafanaLogsUrl,
+  buildGrafanaMetricsUrl,
+  buildGrafanaTracesUrl,
+  buildPlatformDashboardLinks,
+  escapeRegexLiteral,
   __setK8sClientsForTest
 };
