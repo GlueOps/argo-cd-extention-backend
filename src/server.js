@@ -439,12 +439,11 @@ function buildGrafanaAppUrl(pluginId, view, params) {
 // Logs: Grafana Logs Drilldown when the Loki datasource UID is configured, else the
 // classic workload-logs dashboard.
 //
-// Keyed on `service_name`, the only workload-identifying label Loki carries here
-// (its label set is k8s_container_name / k8s_pod_name / service_name -- notably no
-// namespace, so logs cannot be namespace-scoped). Matched with `=~` and a trailing
-// `.*` because service_name is not always exactly the workload name: some workloads
-// surface with a generated suffix (e.g. keda-demo-rabbitmq -> keda-demo-rabbitmq-d7b47c79),
-// which an exact `=` match would miss entirely.
+// Keyed on `k8s_container_name`. The URL schema mirrors what Logs Drilldown (2.3.0)
+// itself produces: the actual filter goes in the adhoc `var-filters` variable
+// (`<label>|<op>|<value>`), while `var-primary_label` only selects WHICH label the
+// view explores by (any value, hence `=~|.+`). Putting the filter in `primary_label`
+// -- as an earlier version did -- leaves the plugin with no applied filter.
 function buildGrafanaLogsUrl(workloadName) {
   if (!workloadName) return '';
   if (GRAFANA_LOKI_DS_UID) {
@@ -454,7 +453,7 @@ function buildGrafanaLogsUrl(workloadName) {
       to: 'now',
       timezone: 'browser',
       'var-ds': GRAFANA_LOKI_DS_UID,
-      'var-filters': '',
+      'var-filters': `k8s_container_name|=|${stripFilterDelimiter(workloadName)}`,
       'var-fields': '',
       'var-levels': '',
       'var-metadata': '',
@@ -462,7 +461,8 @@ function buildGrafanaLogsUrl(workloadName) {
       'var-patterns': '',
       'var-lineFilterV2': '',
       'var-lineFilters': '',
-      'var-primary_label': `service_name|=~|${escapeRegexLiteral(stripFilterDelimiter(workloadName))}.*`
+      'var-primary_label': 'k8s_container_name|=~|.+',
+      'var-filters_replica': ''
     });
   }
   return buildGrafanaDashboardUrl(GRAFANA_LOGS_DASHBOARD, {
@@ -477,20 +477,18 @@ function buildGrafanaLogsUrl(workloadName) {
 function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
   if (!workloadName) return '';
   if (GRAFANA_PROMETHEUS_DS_UID) {
-    // Metrics Drilldown reads adhoc label filters from repeated `var-filters`
-    // params in `<label>|<op>|<value>` form. Scope to the namespace (exact) and
-    // the workload's pods (prefix regex -- pod names carry replicaset/ordinal
-    // suffixes, so an exact match would select nothing).
-    const filters = [];
-    if (namespace) filters.push(`namespace|=|${stripFilterDelimiter(namespace)}`);
-    filters.push(`pod|=~|${escapeRegexLiteral(stripFilterDelimiter(workloadName))}.*`);
+    // Metrics Drilldown (2.2.0) keys workloads by the `container` label and carries
+    // the same filter in BOTH var-metrics_filters and var-filters (`<label>|<op>|<value>`),
+    // which is what the plugin's own URLs produce. `=~` so a container whose name
+    // varies slightly from the workload still matches.
+    const containerFilter = `container|=~|${escapeRegexLiteral(stripFilterDelimiter(workloadName))}`;
     return buildGrafanaAppUrl('grafana-metricsdrilldown-app', 'drilldown', {
       from: 'now-1h',
       to: 'now',
       timezone: 'browser',
       'var-ds': GRAFANA_PROMETHEUS_DS_UID,
-      'var-filters': filters,
-      'var-metrics_filters': '',
+      'var-metrics_filters': containerFilter,
+      'var-filters': containerFilter,
       'var-other_metric_filters': '',
       'var-labelsWingman': '(none)',
       'var-metrics-reducer-sort-by': 'default',

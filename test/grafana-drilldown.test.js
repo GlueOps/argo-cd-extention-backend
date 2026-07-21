@@ -26,40 +26,27 @@ const {
 // percent-encoded pipes and regex metacharacters.
 const paramsOf = (url) => new URL(url).searchParams;
 
-test('logs link targets the Logs Drilldown app when the Loki DS UID is set', () => {
+test('logs link applies the container filter in var-filters, matching Logs Drilldown 2.3.0', () => {
   const url = buildGrafanaLogsUrl('checkout');
   assert.match(url, /^https:\/\/grafana\.example\.com\/a\/grafana-lokiexplore-app\/explore\?/);
   const p = paramsOf(url);
   assert.equal(p.get('var-ds'), 'P8E80F9AEF21F6940');
-  // Loki carries no namespace label here, so service_name is the only workload key.
-  assert.equal(p.get('var-primary_label'), 'service_name|=~|checkout.*');
+  // The real filter lives in the adhoc `var-filters` variable (label|op|value);
+  // `var-primary_label` only selects which label the view explores by (any value).
+  assert.equal(p.get('var-filters'), 'k8s_container_name|=|checkout');
+  assert.equal(p.get('var-primary_label'), 'k8s_container_name|=~|.+');
+  // Plugin 2.3.0 emits this key; it must be present (empty) for the URL to parse cleanly.
+  assert.equal(p.get('var-filters_replica'), '');
 });
 
-test('logs link uses a prefix regex so suffixed service_name values still match', () => {
-  // Real case: workload keda-demo-rabbitmq surfaces in Loki as
-  // keda-demo-rabbitmq-d7b47c79, which an exact `=` match would miss.
-  const p = paramsOf(buildGrafanaLogsUrl('keda-demo-rabbitmq'));
-  const [label, op, value] = p.get('var-primary_label').split('|');
-  assert.equal(label, 'service_name');
-  assert.equal(op, '=~');
-  assert.ok(new RegExp(`^${value}$`).test('keda-demo-rabbitmq-d7b47c79'),
-    'prefix regex must match the suffixed service_name');
-  assert.ok(new RegExp(`^${value}$`).test('keda-demo-rabbitmq'),
-    'prefix regex must still match the bare workload name');
-});
-
-test('metrics link targets the Metrics Drilldown app with repeated adhoc filters', () => {
+test('metrics link filters by container in BOTH var-filters and var-metrics_filters (Drilldown 2.2.0)', () => {
   const url = buildGrafanaMetricsUrl('nonprod', 'checkout', 'deployment');
   assert.match(url, /^https:\/\/grafana\.example\.com\/a\/grafana-metricsdrilldown-app\/drilldown\?/);
   const p = paramsOf(url);
   assert.equal(p.get('var-ds'), 'prometheus');
-  // Drilldown reads multi-valued filters as REPEATED params, not comma-joined.
-  assert.deepEqual(p.getAll('var-filters'), ['namespace|=|nonprod', 'pod|=~|checkout.*']);
-});
-
-test('metrics link omits the namespace filter when the namespace is unknown', () => {
-  const p = paramsOf(buildGrafanaMetricsUrl('', 'checkout', 'deployment'));
-  assert.deepEqual(p.getAll('var-filters'), ['pod|=~|checkout.*']);
+  // The plugin carries the same container filter in both variables.
+  assert.equal(p.get('var-filters'), 'container|=~|checkout');
+  assert.equal(p.get('var-metrics_filters'), 'container|=~|checkout');
 });
 
 test('traces link targets the Traces Drilldown app filtered by service name', () => {
@@ -108,11 +95,12 @@ test('namespace-keyed dashboard drops out when there is no namespace', () => {
   assert.deepEqual(labels, ['APM Overview', 'Kubernetes POD Overview']);
 });
 
-test('regex metacharacters in a workload name are escaped, not interpreted', () => {
+test('regex metacharacters in a workload name are escaped in the regex-matched metrics filter', () => {
   assert.equal(escapeRegexLiteral('a.b+c'), 'a\\.b\\+c');
-  const p = paramsOf(buildGrafanaLogsUrl('a.b'));
-  // The dot must be escaped so it cannot match an arbitrary character.
-  assert.equal(p.get('var-primary_label'), 'service_name|=~|a\\.b.*');
+  // Metrics uses `=~` (regex), so a dot must be escaped to not match an arbitrary char.
+  const p = paramsOf(buildGrafanaMetricsUrl('nonprod', 'a.b', 'deployment'));
+  assert.equal(p.get('var-filters'), 'container|=~|a\\.b');
+  assert.equal(p.get('var-metrics_filters'), 'container|=~|a\\.b');
 });
 
 test('a literal pipe in an inferred name cannot corrupt the Drilldown field split', () => {
@@ -120,12 +108,12 @@ test('a literal pipe in an inferred name cannot corrupt the Drilldown field spli
   // but an inferred-from-header name (e.g. header `argocd:my|app`) could. It must be
   // stripped so the value stays a single field.
   const logs = paramsOf(buildGrafanaLogsUrl('my|app'));
-  assert.equal(logs.get('var-primary_label').split('|').length, 3);
-  assert.equal(logs.get('var-primary_label'), 'service_name|=~|myapp.*');
+  assert.equal(logs.get('var-filters').split('|').length, 3);
+  assert.equal(logs.get('var-filters'), 'k8s_container_name|=|myapp');
 
-  const metrics = paramsOf(buildGrafanaMetricsUrl('ns|x', 'my|app', 'deployment'));
+  const metrics = paramsOf(buildGrafanaMetricsUrl('nonprod', 'my|app', 'deployment'));
   metrics.getAll('var-filters').forEach(f => assert.equal(f.split('|').length, 3));
-  assert.deepEqual(metrics.getAll('var-filters'), ['namespace|=|nsx', 'pod|=~|myapp.*']);
+  assert.equal(metrics.get('var-filters'), 'container|=~|myapp');
 
   const traces = paramsOf(buildGrafanaTracesUrl('nonprod', 'my|app'));
   assert.equal(traces.get('var-filters').split('|').length, 3);

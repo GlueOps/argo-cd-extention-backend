@@ -35,8 +35,8 @@ Set these (and the platform dashboards below) via the chart's `env.grafanaLokiDs
 
 | Signal | Env (default) | Plugin | Workload filter |
 | --- | --- | --- | --- |
-| Logs | `GRAFANA_LOKI_DS_UID` (unset) | `grafana-lokiexplore-app` | `var-primary_label=service_name\|=~\|<workload>.*` |
-| Metrics | `GRAFANA_PROMETHEUS_DS_UID` (unset) | `grafana-metricsdrilldown-app` | repeated `var-filters`: `namespace\|=\|<ns>`, `pod\|=~\|<workload>.*` |
+| Logs | `GRAFANA_LOKI_DS_UID` (unset) | `grafana-lokiexplore-app` | `var-filters=k8s_container_name\|=\|<workload>` (with `var-primary_label=k8s_container_name\|=~\|.+`) |
+| Metrics | `GRAFANA_PROMETHEUS_DS_UID` (unset) | `grafana-metricsdrilldown-app` | `container\|=~\|<workload>` in both `var-filters` and `var-metrics_filters` |
 | Traces | `GRAFANA_TEMPO_DS_UID` (unset) | `grafana-exploretraces-app` | `var-filters=resource.service.name\|=\|<workload>` |
 
 These are **datasource** UIDs, not dashboard UIDs, and they default to unset on
