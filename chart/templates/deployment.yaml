@@ -1,5 +1,10 @@
 {{- include "argocd-extension-backend-api.assertString" (list "image.tag" .Values.image.tag) }}
 {{- include "argocd-extension-backend-api.assertString" (list "image.repository" .Values.image.repository) }}
+{{- /* assertString guards the TYPE only; an empty or whitespace-only string passes it
+       and renders a broken image ref ("repo:" / ": tag ") that fails only at pull time
+       with InvalidImageName. Fail the render instead, matching chart/README's claim. */ -}}
+{{- if eq (trim .Values.image.tag) "" }}{{ fail "image.tag must be a non-empty string; it renders directly into the image reference" }}{{- end }}
+{{- if eq (trim .Values.image.repository) "" }}{{ fail "image.repository must be a non-empty string; it renders directly into the image reference" }}{{- end }}
 {{- /* These render into env vars the app parses as comma-separated lists. Assert them
        here as well as in rbac.yaml: this Deployment renders even with rbac.create=false,
        and `| quote` would otherwise coerce a mistyped list into ALLOWED_NAMESPACES="[a b]"
@@ -7,6 +12,10 @@
 {{- include "argocd-extension-backend-api.assertString" (list "allowedNamespaces" .Values.allowedNamespaces) }}
 {{- include "argocd-extension-backend-api.assertString" (list "allowedAppNamespaces" (.Values.allowedAppNamespaces | default "")) }}
 {{- include "argocd-extension-backend-api.assertString" (list "allowedDestNamespaces" (.Values.allowedDestNamespaces | default "")) }}
+{{- /* argocdAppNamespaces is the fourth comma-separated-list env rendered below; a
+       mistyped YAML list would `| quote` to "[a b]" and split into one bogus entry,
+       same failure mode as the allowed* lists above. Assert it too. */ -}}
+{{- include "argocd-extension-backend-api.assertString" (list "env.argocdAppNamespaces" .Values.env.argocdAppNamespaces) }}
 {{- /* replicaCount is consumed twice: rendered raw below, and compared via `int` in
        poddisruptionbudget.yaml. sprig's `int` returns 0 for an unparseable string, so
        `replicaCount: "abc"` made that template's `gt (int .Values.replicaCount) 1`

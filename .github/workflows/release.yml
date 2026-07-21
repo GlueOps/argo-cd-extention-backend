@@ -63,8 +63,13 @@ jobs:
             echo "::error file=chart/values.yaml::image.tag is '$chart_tag' but the release is '$RELEASE_TAG'"
             fail=1
           fi
+          # Anchor the tag to end-of-line/whitespace: a plain -F substring match lets a
+          # stale pin whose tag has the release tag as a PREFIX (e.g. :v0.1.20 while
+          # releasing v0.1.2) false-pass the gate. Escape dots so they match literally.
+          image_re="${image//./\\.}"
+          tag_re="${RELEASE_TAG//./\\.}"
           for m in manifests/argocd-backend.yaml manifests/venus-backend.yaml; do
-            if ! grep -qF "image: $image:$RELEASE_TAG" "$m"; then
+            if ! grep -qE "image: ${image_re}:${tag_re}([[:space:]]|\$)" "$m"; then
               echo "::error file=$m::does not pin $image:$RELEASE_TAG (found: $(grep -F "image: $image:" "$m" || echo none))"
               fail=1
             fi

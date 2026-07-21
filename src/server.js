@@ -37,6 +37,30 @@ function assertInRange(name, value, min, max) {
   }
 }
 
+// Validate a configured base URL at boot. A scheme-prefix regex is not enough: a
+// value like "https://exa mple.com" or "http://prom/api?x=1" passes `^https?://`
+// yet is either rejected by `new URL()` or carries a query/fragment that breaks
+// buildUrl's `new URL(path, base)` resolution — turning an operator config error
+// into a per-request 502 misattributed to the upstream. `proxied` bases are
+// dereferenced at request time, so they must additionally carry no query/fragment.
+function assertHttpBaseUrl(name, value, { proxied = false } = {}) {
+  if (!value) return;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_err) {
+    parsed = null;
+  }
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+    console.error(`[FATAL] ${name} must be an http(s) URL, got: ${JSON.stringify(process.env[name])}`);
+    process.exit(1);
+  }
+  if (proxied && (parsed.search || parsed.hash)) {
+    console.error(`[FATAL] ${name} must not contain a query string or fragment, got: ${JSON.stringify(process.env[name])}`);
+    process.exit(1);
+  }
+}
+
 const PORT = requirePositiveInt('PORT', 8000);
 assertInRange('PORT', PORT, 1, 65535);
 
@@ -53,7 +77,11 @@ assertInRange('REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS, 1, 2147483647);
 // buildUrl's `new URL()`, turning a config mistake into a per-request 502.
 const PROMETHEUS_BASE_URL = (process.env.PROMETHEUS_BASE_URL || '').trim().replace(/\/$/, '');
 const TEMPO_BASE_URL = (process.env.TEMPO_BASE_URL || '').trim().replace(/\/$/, '');
-const TEMPO_SEARCH_PATH = (process.env.TEMPO_SEARCH_PATH || '/api/search').trim();
+// A whitespace-only value is truthy, so it skips the `||` default and trims to '',
+// which would make buildUrl('', ...) resolve to the Tempo BASE ROOT instead of the
+// search endpoint — a silently-degraded request, not a boot error. Fall back to the
+// default for the empty/whitespace-only sibling, same as an unset var.
+const TEMPO_SEARCH_PATH = (process.env.TEMPO_SEARCH_PATH || '/api/search').trim() || '/api/search';
 
 if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(TEMPO_SEARCH_PATH)) {
   console.error(`[FATAL] TEMPO_SEARCH_PATH must be a relative path, not an absolute URL: ${JSON.stringify(TEMPO_SEARCH_PATH)}`);
@@ -88,8 +116,12 @@ const ALLOWED_DEST_NAMESPACES = (process.env.ALLOWED_DEST_NAMESPACES ?? ALLOWED_
 
 // Grafana dashboard paths ("<uid>" or "<uid>/<slug>"). Defaults match the GlueOps
 // platform dashboards; override per-cluster instead of hardcoding inline.
-const GRAFANA_LOGS_DASHBOARD = (process.env.GRAFANA_LOGS_DASHBOARD || 'tBmi6B0Vz/loki-workload-logs').trim().replace(/^\/+|\/+$/g, '');
-const GRAFANA_METRICS_DASHBOARD = (process.env.GRAFANA_METRICS_DASHBOARD || 'a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload').trim().replace(/^\/+|\/+$/g, '');
+// Trim BEFORE applying the default so a whitespace-only value (e.g. a Helm value
+// that renders to spaces) falls back to the default instead of trimming to '' and
+// silently dropping the whole logs/metrics category — same trim-order fix as the
+// base URLs above.
+const GRAFANA_LOGS_DASHBOARD = ((process.env.GRAFANA_LOGS_DASHBOARD || '').trim() || 'tBmi6B0Vz/loki-workload-logs').replace(/^\/+|\/+$/g, '');
+const GRAFANA_METRICS_DASHBOARD = ((process.env.GRAFANA_METRICS_DASHBOARD || '').trim() || 'a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload').replace(/^\/+|\/+$/g, '');
 // Traces dashboard ("<uid>" or "<uid>/<slug>"). Unset by default — set this to the Tempo
 // traces dashboard UID to get a real dashboard link; otherwise traces falls back to Explore.
 const GRAFANA_TRACES_DASHBOARD = (process.env.GRAFANA_TRACES_DASHBOARD || '').trim().replace(/^\/+|\/+$/g, '');
@@ -127,36 +159,19 @@ const GRAFANA_K8S_POD_DASHBOARD = (process.env.GRAFANA_K8S_POD_DASHBOARD || '').
 // clusters that share namespace/workload names (otherwise the link is ambiguous).
 const CLUSTER_NAME = (process.env.CLUSTER_NAME || '').trim();
 
-// Validate URLs are well-formed if provided.
-// PROMETHEUS_BASE_URL/TEMPO_BASE_URL are the two that are actually dereferenced at
-// request time (buildUrl -> new URL()), so a malformed value here is worse than for
-// the link-only vars: it passes the `if (!X_BASE_URL)` config guard, then throws
-// inside the handler and is reported as a generic 502 "failed to reach the upstream".
-// That misattributes an operator config error to the upstream. Fail fast at boot
-// instead, matching the link-only vars below.
-if (PROMETHEUS_BASE_URL && !/^https?:\/\//.test(PROMETHEUS_BASE_URL)) {
-  console.error(`[FATAL] PROMETHEUS_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.PROMETHEUS_BASE_URL)}`);
-  process.exit(1);
-}
-if (TEMPO_BASE_URL && !/^https?:\/\//.test(TEMPO_BASE_URL)) {
-  console.error(`[FATAL] TEMPO_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.TEMPO_BASE_URL)}`);
-  process.exit(1);
-}
-// Report the RAW env value, not the trimmed/stripped one: echoing the processed
-// value hides the very characters that caused the rejection (" https://x" reads back
-// as "https://x", which looks valid).
-if (GRAFANA_BASE_URL && !/^https?:\/\//.test(GRAFANA_BASE_URL)) {
-  console.error(`[FATAL] GRAFANA_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.GRAFANA_BASE_URL)}`);
-  process.exit(1);
-}
-if (VAULT_BASE_URL && !/^https?:\/\//.test(VAULT_BASE_URL)) {
-  console.error(`[FATAL] VAULT_BASE_URL must be an http(s) URL, got: ${JSON.stringify(process.env.VAULT_BASE_URL)}`);
-  process.exit(1);
-}
-if (DEPLOYMENT_CONFIG_REPO_URL && !/^https?:\/\//.test(DEPLOYMENT_CONFIG_REPO_URL)) {
-  console.error(`[FATAL] DEPLOYMENT_CONFIG_REPO_URL must be an http(s) URL, got: ${JSON.stringify(process.env.DEPLOYMENT_CONFIG_REPO_URL)}`);
-  process.exit(1);
-}
+// Validate configured URLs are well-formed if provided (see assertHttpBaseUrl).
+// PROMETHEUS_BASE_URL/TEMPO_BASE_URL are the two dereferenced at request time
+// (buildUrl -> new URL(path, base)): a malformed value would otherwise pass the
+// `if (!X_BASE_URL)` config guard, then throw inside the handler and surface as a
+// generic 502 that misattributes an operator config error to the upstream. So they
+// must parse AND carry no query/fragment. The rejection message echoes the RAW env
+// value (assertHttpBaseUrl reads process.env[name]) rather than the trimmed one,
+// which would hide the very characters that caused the rejection.
+assertHttpBaseUrl('PROMETHEUS_BASE_URL', PROMETHEUS_BASE_URL, { proxied: true });
+assertHttpBaseUrl('TEMPO_BASE_URL', TEMPO_BASE_URL, { proxied: true });
+assertHttpBaseUrl('GRAFANA_BASE_URL', GRAFANA_BASE_URL);
+assertHttpBaseUrl('VAULT_BASE_URL', VAULT_BASE_URL);
+assertHttpBaseUrl('DEPLOYMENT_CONFIG_REPO_URL', DEPLOYMENT_CONFIG_REPO_URL);
 
 console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)} ALLOWED_APP_NAMESPACES=${JSON.stringify(ALLOWED_APP_NAMESPACES)} ALLOWED_DEST_NAMESPACES=${JSON.stringify(ALLOWED_DEST_NAMESPACES)}`);
 
@@ -245,7 +260,14 @@ function isRemoteCluster(destination) {
 
 function normalizeGitRepoUrl(repoUrl) {
   if (typeof repoUrl !== 'string') return '';
-  return repoUrl.replace(/\.git$/, '').replace(/\/$/, '');
+  // Strip trailing slashes BEFORE the ".git" suffix. Argo CD treats "repo",
+  // "repo/", "repo.git" and "repo.git/" as the same repo, but stripping ".git"
+  // first leaves "repo.git" intact for a "repo.git/" input, so the equality check
+  // against the configured DEPLOYMENT_CONFIG_REPO_URL fails and every config-derived
+  // Vault link is silently dropped for that (legitimate) repoURL spelling. Match
+  // ".git" case-insensitively for the same reason. Trim first so a whitespace-padded
+  // spec.source.repoURL normalizes consistently too.
+  return repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
 }
 
 function asNonEmptyString(value) {
@@ -635,14 +657,28 @@ async function fetchText(url, headers) {
   }
 }
 
-// relativePath comes from the Application's valueFiles (untrusted). A "../" stays
-// inside the config repo but can still reach ANOTHER tenant's directory (e.g.
-// apps/team-a/../team-b/values.yaml) and leak their Vault paths — the local realpath
-// check only blocks escaping the repo root, and the GitHub API/raw reads pass "../"
-// straight through. So reject traversal / non-relative forms up front for ALL reads.
+// relativePath comes from the Application's valueFiles (untrusted). Reject traversal
+// / non-relative forms up front for ALL reads: the local realpath check only blocks
+// escaping the repo ROOT, and the GitHub API/raw reads pass "../" straight through,
+// so a "../" could otherwise read outside the intended subtree.
+// NOTE: this does NOT by itself confine a read to the requesting app's own directory.
+// A direct sibling path (e.g. apps/other-tenant/values.yaml, no "../") passes this
+// guard and is fetched with GITHUB_TOKEN, disclosing another tenant's Vault secret
+// *paths* (names, not values). The scope check in collectAppSpecificValueFiles bounds
+// reads to the configured config repo, and the caller must hold `extensions,invoke`
+// RBAC on the requesting Application, but intra-repo cross-tenant path disclosure via
+// an attacker-authored valueFiles entry is not prevented here — see the apps/<x>/
+// path filter there, which is by directory shape, not by app identity.
 function isSafeRepoRelativePath(p) {
-  return typeof p === 'string' && p !== '' &&
-    !p.includes('\\') && !p.startsWith('/') && !p.split('/').includes('..');
+  if (typeof p !== 'string') return false;
+  // Validate the TRIMMED form, because every downstream consumer (buildGitRawUrl,
+  // buildGitHubContentsApiUrl, buildGitTreeUrl) trims before rendering the path into
+  // a URL. Validating the raw string would let a leading-whitespace value like
+  // " ../other-tenant" pass here (its first segment " .." != "..") yet become an
+  // active "../" traversal once trimmed downstream.
+  const t = p.trim();
+  return t !== '' &&
+    !t.includes('\\') && !t.startsWith('/') && !t.split('/').includes('..');
 }
 
 async function readConfigRepoFileText(repoUrl, revision, relativePath) {
@@ -1182,8 +1218,11 @@ app.get('/api/links', asyncHandler(async (req, res) => {
   // This response is keyed by the Argocd-Application-Name request header and exposes
   // per-application data. Prevent any shared/browser/intermediary cache from reusing
   // one app's links for another (caches key on URL, not header, unless told via Vary).
+  // The response body/status also varies on Argocd-Project-Name (the project header
+  // gate below can 403), so include it too — defense-in-depth for any intermediary
+  // that ignores no-store, so a cached 200/403 can't be reused across project values.
   res.set('Cache-Control', 'no-store');
-  res.set('Vary', 'Argocd-Application-Name');
+  res.set('Vary', 'Argocd-Application-Name, Argocd-Project-Name');
 
   const projectName = (req.get('Argocd-Project-Name') || '').trim();
 

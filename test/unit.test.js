@@ -203,6 +203,15 @@ test('isSafeRepoRelativePath rejects traversal and non-relative paths', () => {
   assert.equal(isSafeRepoRelativePath('apps\\team-a\\values.yaml'), false);
   assert.equal(isSafeRepoRelativePath(''), false);
   assert.equal(isSafeRepoRelativePath(null), false);
+  // Whitespace-padded traversal: validation must match what the URL builders
+  // render, and they trim first. A raw-string check would let " ../x" (first
+  // segment " ..") slip through, then trim it to an active "../" downstream.
+  assert.equal(isSafeRepoRelativePath(' ../other-tenant/values.yaml'), false);
+  assert.equal(isSafeRepoRelativePath('\t../secrets.yaml'), false);
+  assert.equal(isSafeRepoRelativePath(' /etc/passwd'), false);
+  // A whitespace-padded but otherwise legitimate path is still accepted (the
+  // builders trim it before rendering).
+  assert.equal(isSafeRepoRelativePath('  apps/team-a/values.yaml  '), true);
 });
 
 test('isNamespaceAllowed fails closed on an empty or whitespace-only list', () => {

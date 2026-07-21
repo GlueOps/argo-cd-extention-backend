@@ -178,8 +178,9 @@ spec:
             # by the app-namespace gate, so it only adds latency.
             - name: ARGOCD_APP_NAMESPACES
               value: "argocd"
-            # Bounded to "argocd" -- see the Role/RoleBinding comment above for
-            # why "*" (paired with cluster-wide secrets:list) is avoided here.
+            # Bounded to "argocd" -- see the Role/RoleBinding comment above for why
+            # "*" (which would force a cluster-wide workload/ExternalSecret list grant)
+            # is avoided here. This app requests no secrets/pods RBAC at all.
             - name: ALLOWED_NAMESPACES
               value: "argocd"
           startupProbe:

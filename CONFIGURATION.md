@@ -85,12 +85,19 @@ Vault KV path — discovered two ways:
 
 ### 3. Deployment configuration repository
 
-**Env:** `DEPLOYMENT_CONFIG_REPO_URL` (e.g. `https://github.com/GlueOps/deployment-configurations`).
-
-Derived from the Application's Helm `valueFiles` (`$ref/apps/<...>` entries). The link
+The config-repo link is derived from the **Application's own** `spec.sources[].repoURL`
+and Helm `valueFiles` (`$ref/apps/<...>` entries) — it does **not** require
+`DEPLOYMENT_CONFIG_REPO_URL` and is emitted whether or not that var is set. The link
 targets the **directory containing** the value file, e.g.
 `.../tree/<revision>/apps/team-a/backend` — nested layouts are handled, not just a
 flat `apps/<name>`.
+
+`DEPLOYMENT_CONFIG_REPO_URL` (e.g. `https://github.com/GlueOps/deployment-configurations`)
+is a **separate** control: it scopes which repo's value files the backend will fetch
+when deriving the config-file-based **Vault secret** links in §2 (a confused-deputy
+guard, so an Application can't point the backend's `GITHUB_TOKEN` at an arbitrary repo).
+Leave it unset and those config-file-derived Vault links are silently dropped; the
+live-ExternalSecret Vault path in §2 is unaffected.
 
 For private config repos, set `GITHUB_TOKEN` (via a Secret) so the backend can read
 value files through the GitHub Contents API. Optionally set `CONFIG_REPO_LOCAL_ROOT`
@@ -197,7 +204,9 @@ kubectl logs -n <ns> deployment/argocd-extension-backend-api
 
 Common causes:
 
-1. Service URLs not set (`GRAFANA_BASE_URL`, `VAULT_BASE_URL`, `DEPLOYMENT_CONFIG_REPO_URL`).
+1. Service URLs not set (`GRAFANA_BASE_URL`, `VAULT_BASE_URL`). Missing **config-file-derived
+   Vault** links specifically: `DEPLOYMENT_CONFIG_REPO_URL` unset or not matching the
+   Application's config-repo `repoURL` (config-repo links themselves don't need it).
 2. Namespace not in `ALLOWED_NAMESPACES`.
 3. Missing RBAC — the pod's ServiceAccount lacks the verbs above (`/api/links` will
    return `degraded` results). Check `kubectl auth can-i list applications.argoproj.io --as=system:serviceaccount:<ns>:<sa>`.

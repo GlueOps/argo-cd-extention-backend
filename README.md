@@ -1,8 +1,9 @@
 # Argo CD Extension Backend API
 
 Backend service for the GlueOps Argo CD UI extension. It resolves an Argo CD
-Application to context-aware links (Grafana logs/metrics/traces, Vault secrets,
-deployment-config repo) and proxies Prometheus/Tempo queries for the UI panels.
+Application to context-aware links (Grafana logs/metrics/traces, platform dashboards,
+Vault secrets, deployment-config repo) and proxies Prometheus/Tempo queries for the UI
+panels.
 
 ## Security model (read this first)
 
@@ -21,9 +22,12 @@ in place:
    namespace (the chart defaults to `kubernetes.io/metadata.name: argocd`).
 2. The app rejects requests without a well-formed app-context header — the
    Prometheus/Tempo proxy routes return `401`, while `/api/links` returns `400
-   invalid_request` — and enforces the namespace allowlist on both the Application namespace
-   (`ALLOWED_APP_NAMESPACES`) and its destination namespace
-   (`ALLOWED_DEST_NAMESPACES`) — each defaulting to `ALLOWED_NAMESPACES`.
+   invalid_request`. Both paths enforce `ALLOWED_APP_NAMESPACES` on the header's
+   Application namespace. `ALLOWED_DEST_NAMESPACES` is enforced **only by
+   `/api/links`**, and only *after* it resolves the Application to read
+   `spec.destination.namespace` (the destination can't be derived from the header
+   alone); the proxy routes don't resolve the Application, so they gate on the
+   Application namespace only. Both allowlists default to `ALLOWED_NAMESPACES`.
 
 Do **not** expose this Service via an Ingress/LoadBalancer.
 
@@ -94,9 +98,15 @@ Response contract notes for UI consumers:
 - Every category always has a `links` array (possibly empty) — safe to `.map()`.
 - Category `status` is one of `ok` | `degraded` | `empty`.
 - `vault-secrets` includes a numeric `count`.
-- One link is emitted **per discovered workload**; `label` is the workload name.
+- For the `logs`, `metrics` and `traces` categories, one link is emitted **per
+  discovered workload** and `label` is the workload name. The `dashboards` category
+  emits platform-dashboard links (`APM Overview`, `Kubernetes Overview`, `Kubernetes
+  POD Overview`) whose labels are the dashboard names (suffixed with the workload name
+  only when more than one workload is discovered), not the workload name.
 - Error responses use `{ "status": "error", "errorType": "...", "error": "..." }`.
-- Responses are `Cache-Control: no-store` and `Vary: Argocd-Application-Name`.
+- Responses are `Cache-Control: no-store`; `/api/links` sets
+  `Vary: Argocd-Application-Name, Argocd-Project-Name` and the proxy routes set
+  `Vary: Argocd-Application-Name`.
 
 ## Environment variables
 
@@ -118,7 +128,7 @@ Response contract notes for UI consumers:
 | `GRAFANA_TRACES_DASHBOARD` | — | Traces dashboard; unset ⇒ Grafana Explore fallback. |
 | `CLUSTER_NAME` | — | Value for the metrics dashboard's `var-cluster` (set when one Grafana serves multiple clusters). |
 | `VAULT_BASE_URL` | — | Enables Vault secret links (from ExternalSecret `remoteRef.key`). |
-| `DEPLOYMENT_CONFIG_REPO_URL` | — | Deployment-config repo (used to derive config + secret links). |
+| `DEPLOYMENT_CONFIG_REPO_URL` | — | Scopes value-file reads for **config-derived Vault secret links** (confused-deputy guard: only value files in this repo are fetched). Config-repo links themselves come from the Application's own `spec.sources[].repoURL` and are emitted regardless. Unset ⇒ config-file-derived Vault links are silently dropped (the live-ExternalSecret path is unaffected). |
 | `CONFIG_REPO_LOCAL_ROOT` | — | Optional local checkout of the config repo (reads are confined to this root). |
 | `GITHUB_TOKEN` | — | Optional; authenticates GitHub Contents API for private config repos (provide via a Secret). |
 
@@ -126,8 +136,8 @@ See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-en
 
 ## Deployment
 
-The chart and the raw manifests both reference `ghcr.io/glueops/argocd-extension-backend-api:v0.1.1`,
-matching `package.json`. The release workflow refuses to publish unless the release tag,
+The chart and the raw manifests both pin the same `ghcr.io/glueops/argocd-extension-backend-api`
+image tag as `package.json`. The release workflow refuses to publish unless the release tag,
 `package.json`, `chart/values.yaml` and both manifests all agree, so the image tag, SBOM
 and provenance always describe the same artifact — bump all four together.
 
