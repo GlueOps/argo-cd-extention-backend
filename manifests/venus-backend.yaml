@@ -173,19 +173,33 @@ spec:
               value: "https://vault.nonprod.venus.onglueops.rocks"
             - name: DEPLOYMENT_CONFIG_REPO_URL
               value: "https://github.com/GlueOps/deployment-configurations"
-            - name: ARGOCD_APP_NAMESPACES
-              value: "argocd,glueops-core"
             # ALLOWED_NAMESPACES gates TWO axes; here they differ, so set them
             # explicitly rather than collapsing both to one value:
             #  - App-CR namespace (the Argocd-Application-Name header prefix):
-            #    Applications live in argocd/glueops-core (see ARGOCD_APP_NAMESPACES),
-            #    so gating on "nonprod" would 403 every real request.
+            #    Applications live in argocd/glueops-core, so gating on "nonprod"
+            #    would 403 every real request.
             #  - Destination namespace (where workload/ExternalSecret reads happen,
             #    and what the Role below is scoped to): "nonprod".
             - name: ALLOWED_APP_NAMESPACES
               value: "argocd,glueops-core"
             - name: ALLOWED_DEST_NAMESPACES
               value: "nonprod"
+            # Optional Grafana Drilldown datasource UIDs + platform dashboard UIDs.
+            # Uncomment and set on clusters running the OTEL monitoring stack (see
+            # CONFIGURATION.md). Unset => that signal keeps its classic dashboard /
+            # the dashboard link is dropped.
+            # - name: GRAFANA_LOKI_DS_UID
+            #   value: ""
+            # - name: GRAFANA_PROMETHEUS_DS_UID
+            #   value: ""
+            # - name: GRAFANA_TEMPO_DS_UID
+            #   value: ""
+            # - name: GRAFANA_APM_DASHBOARD
+            #   value: ""
+            # - name: GRAFANA_K8S_OVERVIEW_DASHBOARD
+            #   value: ""
+            # - name: GRAFANA_K8S_POD_DASHBOARD
+            #   value: ""
           startupProbe:
             httpGet:
               path: /healthz

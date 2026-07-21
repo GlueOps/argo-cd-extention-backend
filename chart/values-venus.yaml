@@ -6,8 +6,8 @@
 # The namespace allowlist gates two axes; here they differ, so set them
 # explicitly instead of a single allowedNamespaces:
 #  - allowedAppNamespaces: the Application-CR namespace (Argocd-Application-Name
-#    header prefix). Applications live in argocd/glueops-core (see
-#    env.argocdAppNamespaces), so gating on "nonprod" would 403 every request.
+#    header prefix). Applications live in argocd/glueops-core, so gating on
+#    "nonprod" would 403 every request.
 #  - allowedDestNamespaces: spec.destination.namespace, where workload/
 #    ExternalSecret reads happen. RBAC (templates/rbac.yaml) scopes the
 #    Role/RoleBinding to this, so it stays confined to "nonprod".
@@ -33,7 +33,6 @@ env:
   # secrets derived by reading value files depend on it. That path additionally needs
   # githubToken below when the repo is private.
   deploymentConfigRepoUrl: "https://github.com/GlueOps/deployment-configurations"
-  argocdAppNamespaces: "argocd,glueops-core"
 
 # The tenant deployment-configurations repo is private, so reading value files from
 # it (for config-derived Vault links) requires a token. Without this, that path

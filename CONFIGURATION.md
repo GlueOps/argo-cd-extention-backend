@@ -28,6 +28,11 @@ Newer Grafana ships Logs/Metrics/Traces **Drilldown** as app plugins, served fro
 datasource UID below switches that signal to its Drilldown app; leaving it unset
 keeps the classic dashboard from the table above.
 
+Set these (and the platform dashboards below) via the chart's `env.grafanaLokiDsUid`
+/ `env.grafanaPrometheusDsUid` / `env.grafanaTempoDsUid` / `env.grafanaApmDashboard`
+/ `env.grafanaK8sOverviewDashboard` / `env.grafanaK8sPodDashboard` values (or a raw
+`extraEnv` entry), or as container env vars directly in the raw manifests.
+
 | Signal | Env (default) | Plugin | Workload filter |
 | --- | --- | --- | --- |
 | Logs | `GRAFANA_LOKI_DS_UID` (unset) | `grafana-lokiexplore-app` | `var-primary_label=service_name\|=~\|<workload>.*` |

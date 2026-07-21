@@ -78,10 +78,6 @@ env:
   vaultBaseUrl: ""
   deploymentConfigRepoUrl: ""
   configRepoLocalRoot: ""
-  # Namespaces to additionally try when resolving an Argo CD Application by
-  # name before falling back to the cluster-wide list. Defaults match the
-  # app's own built-in default.
-  argocdAppNamespaces: "argocd,glueops-core"
   grafanaLogsDashboard: ""
   grafanaMetricsDashboard: ""
   grafanaTracesDashboard: ""
@@ -89,6 +85,27 @@ env:
   # one Grafana instance serves multiple clusters. Leave empty for
   # single-cluster Grafana.
   clusterName: ""
+  # Grafana Drilldown datasource UIDs. When a signal's datasource UID is set,
+  # that signal (logs/metrics/traces) links to its Drilldown app plugin instead
+  # of the classic dashboard above. Empty => keep using the classic dashboard.
+  # Only present on clusters running the OTEL monitoring stack; leave empty
+  # otherwise (a /a/<plugin>/ link on a cluster without the plugin 404s).
+  grafanaLokiDsUid: ""
+  grafanaPrometheusDsUid: ""
+  grafanaTempoDsUid: ""
+  # Platform dashboard UIDs (APM / Kubernetes Overview / Kubernetes POD Overview).
+  # Empty => that dashboard link is dropped. Set on clusters that have them.
+  grafanaApmDashboard: ""
+  grafanaK8sOverviewDashboard: ""
+  grafanaK8sPodDashboard: ""
+
+# Additional raw environment variables appended verbatim to the container, for
+# any server knob not modeled under `env` above. Standard core-v1 EnvVar entries.
+# Example:
+#   extraEnv:
+#     - name: SOME_NEW_FLAG
+#       value: "1"
+extraEnv: []
 
 # GITHUB_TOKEN is sensitive and is deliberately never accepted as a plain
 # value in this file. Create the Secret out-of-band (e.g. via an

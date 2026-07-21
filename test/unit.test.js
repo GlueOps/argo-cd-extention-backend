@@ -21,8 +21,28 @@ const {
   isNamespaceAllowed,
   isSafeRepoRelativePath,
   buildConfigRepoLinks,
-  collectAppSpecificValueFiles
+  collectAppSpecificValueFiles,
+  dedupeLinksByUrl
 } = require('../src/server');
+
+test('dedupeLinksByUrl collapses byte-identical URLs, keeping the first label', () => {
+  const links = [
+    { url: 'https://g/d/x?var-namespace=ns', label: 'Kubernetes Overview' },
+    { url: 'https://g/d/x?var-namespace=ns', label: 'Kubernetes Overview' },
+    { url: 'https://g/d/y?var-app=web', label: 'APM Overview' },
+    { url: 'https://g/logs?w=web', label: 'web' },
+    { url: 'https://g/logs?w=web', label: 'web' }
+  ];
+  const out = dedupeLinksByUrl(links);
+  assert.equal(out.length, 3);
+  assert.deepEqual(out.map(l => l.url), [
+    'https://g/d/x?var-namespace=ns',
+    'https://g/d/y?var-app=web',
+    'https://g/logs?w=web'
+  ]);
+  // A link with no url is dropped rather than throwing.
+  assert.deepEqual(dedupeLinksByUrl([{ label: 'x' }, null]), []);
+});
 
 test('buildQueryString preserves multi-value params and drops non-scalars', () => {
   assert.equal(buildQueryString({ q: 'up', tags: ['a', 'b'] }), 'q=up&tags=a&tags=b');

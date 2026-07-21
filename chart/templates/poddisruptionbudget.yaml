@@ -27,11 +27,20 @@
        apply time. Assert the numeric portion is integral first so the error is a
        fail-fast render error with context, not a late admission rejection. */ -}}
 {{- include "argocd-extension-backend-api.assertIntegral" (list "podDisruptionBudget.minAvailable (percentage)" $pct) }}
+{{- /* The apiserver IntOrString percent validation is `^([0-9]+)%$`, so a negative
+       percent (assertIntegral accepts "-50") renders but is rejected at admission.
+       Fail fast on it too, alongside the >=100% deadlock case. */ -}}
+{{- if lt (int $pct) 0 }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be a non-negative percentage" $minAvailable) }}
+{{- end }}
 {{- if ge (int $pct) 100 }}
 {{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than 100%%, otherwise no voluntary disruption is ever permitted and node drains hang" $minAvailable) }}
 {{- end }}
 {{- else }}
 {{- include "argocd-extension-backend-api.assertIntegral" (list "podDisruptionBudget.minAvailable" $minAvailable) }}
+{{- if lt (int $minAvailable) 0 }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be non-negative" $minAvailable) }}
+{{- end }}
 {{- if ge (int $minAvailable) (int .Values.replicaCount) }}
 {{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than replicaCount (%v), otherwise no voluntary disruption is ever permitted and node drains hang" $minAvailable .Values.replicaCount) }}
 {{- end }}
@@ -40,7 +49,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ include "argocd-extension-backend-api.fullname" . | quote }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "argocd-extension-backend-api.labels" . | nindent 4 }}
 spec:

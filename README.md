@@ -118,7 +118,6 @@ Response contract notes for UI consumers:
 | `ALLOWED_NAMESPACES` | `*` | Comma-separated allow-list, or `*`, applied to **both** namespace axes below. **`*` plus broad RBAC is unsafe on shared clusters — set a bounded list.** An explicitly empty value fails closed (denies all). |
 | `ALLOWED_APP_NAMESPACES` | `ALLOWED_NAMESPACES` | Overrides the allow-list for the **Application CR** namespace (the `Argocd-Application-Name` header prefix). |
 | `ALLOWED_DEST_NAMESPACES` | `ALLOWED_NAMESPACES` | Overrides the allow-list for the Application's **`spec.destination.namespace`** (where workload/secret reads happen). Set this when apps live in `argocd` but deploy elsewhere — otherwise one list gates both axes and 403s them. See [CONFIGURATION.md](CONFIGURATION.md). |
-| `ARGOCD_APP_NAMESPACES` | `argocd,glueops-core` | Namespaces to look up Application CRs in. |
 | `PROMETHEUS_BASE_URL` | — | Enables the Prometheus proxy. |
 | `TEMPO_BASE_URL` | — | Enables the Tempo proxy (empty ⇒ `{ "traces": [] }`). |
 | `TEMPO_SEARCH_PATH` | `/api/search` | Relative search path on Tempo. |
@@ -126,10 +125,17 @@ Response contract notes for UI consumers:
 | `GRAFANA_LOGS_DASHBOARD` | `tBmi6B0Vz/loki-workload-logs` | Logs dashboard `uid` or `uid/slug`. |
 | `GRAFANA_METRICS_DASHBOARD` | `a164a7f0.../kubernetes-compute-resources-workload` | Metrics dashboard. |
 | `GRAFANA_TRACES_DASHBOARD` | — | Traces dashboard; unset ⇒ Grafana Explore fallback. |
-| `CLUSTER_NAME` | — | Value for the metrics dashboard's `var-cluster` (set when one Grafana serves multiple clusters). |
+| `GRAFANA_LOKI_DS_UID` | — | Loki datasource UID; set ⇒ logs link to the Grafana **Logs Drilldown** app instead of the classic dashboard. |
+| `GRAFANA_PROMETHEUS_DS_UID` | — | Prometheus datasource UID; set ⇒ metrics link to the **Metrics Drilldown** app. |
+| `GRAFANA_TEMPO_DS_UID` | — | Tempo datasource UID; set ⇒ traces link to the **Traces Drilldown** app. |
+| `GRAFANA_APM_DASHBOARD` | — | APM Overview dashboard UID (`dashboards` category); unset ⇒ link dropped. |
+| `GRAFANA_K8S_OVERVIEW_DASHBOARD` | — | Kubernetes Overview dashboard UID; unset ⇒ link dropped. |
+| `GRAFANA_K8S_POD_DASHBOARD` | — | Kubernetes POD Overview dashboard UID; unset ⇒ link dropped. |
+| `CLUSTER_NAME` | — | Value for the metrics dashboard's `var-cluster` and the POD Overview dashboard (set when one Grafana serves multiple clusters). |
 | `VAULT_BASE_URL` | — | Enables Vault secret links (from ExternalSecret `remoteRef.key`). |
 | `DEPLOYMENT_CONFIG_REPO_URL` | — | Scopes value-file reads for **config-derived Vault secret links** (confused-deputy guard: only value files in this repo are fetched). Config-repo links themselves come from the Application's own `spec.sources[].repoURL` and are emitted regardless. Unset ⇒ config-file-derived Vault links are silently dropped (the live-ExternalSecret path is unaffected). |
 | `CONFIG_REPO_LOCAL_ROOT` | — | Optional local checkout of the config repo (reads are confined to this root). |
+| `MAX_CONFIG_VALUE_FILES` | `50` | Max distinct config-repo value files read per request (positive integer). Excess files are skipped with a `[WARN]` log; guards the shared `GITHUB_TOKEN` rate limit and request latency. |
 | `GITHUB_TOKEN` | — | Optional; authenticates GitHub Contents API for private config repos (provide via a Secret). |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for link URL patterns, RBAC, and per-environment examples.

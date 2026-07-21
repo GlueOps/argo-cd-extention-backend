@@ -49,3 +49,26 @@ test('a padded DEPLOYMENT_CONFIG_REPO_URL still matches an Application repoURL',
     path: 'apps/team-a/values.yaml'
   }]);
 });
+
+// An app can declare an unbounded number of value files; each is a token-authenticated
+// GitHub fetch, so the collector caps the fan-out at MAX_CONFIG_VALUE_FILES (default 50)
+// rather than letting one app burn the shared rate limit / hang the request.
+test('collectAppSpecificValueFiles caps the number of value files it returns', () => {
+  const valueFiles = [];
+  for (let i = 0; i < 120; i++) valueFiles.push(`$values/apps/team-a/v${i}/values.yaml`);
+  const appObj = {
+    metadata: { name: 'team-a' },
+    spec: {
+      sources: [
+        { ref: 'values', repoURL: 'https://github.com/GlueOps/deployment-configurations', targetRevision: 'main' },
+        { repoURL: 'https://github.com/GlueOps/app', helm: { valueFiles } }
+      ]
+    }
+  };
+
+  const result = collectAppSpecificValueFiles(appObj);
+  assert.equal(result.length, 50);
+  // The cap keeps the FIRST N distinct entries in declaration order.
+  assert.equal(result[0].path, 'apps/team-a/v0/values.yaml');
+  assert.equal(result[49].path, 'apps/team-a/v49/values.yaml');
+});

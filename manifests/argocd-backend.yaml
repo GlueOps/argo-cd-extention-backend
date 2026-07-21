@@ -173,16 +173,27 @@ spec:
               value: ""
             - name: DEPLOYMENT_CONFIG_REPO_URL
               value: ""
-            # Only "argocd" -- must stay aligned with ALLOWED_NAMESPACES below.
-            # Any extra namespace here is probed on every lookup but then 403'd
-            # by the app-namespace gate, so it only adds latency.
-            - name: ARGOCD_APP_NAMESPACES
-              value: "argocd"
             # Bounded to "argocd" -- see the Role/RoleBinding comment above for why
             # "*" (which would force a cluster-wide workload/ExternalSecret list grant)
             # is avoided here. This app requests no secrets/pods RBAC at all.
             - name: ALLOWED_NAMESPACES
               value: "argocd"
+            # Optional Grafana Drilldown datasource UIDs + platform dashboard UIDs.
+            # Uncomment and set on clusters running the OTEL monitoring stack (see
+            # CONFIGURATION.md). Unset => that signal keeps its classic dashboard /
+            # the dashboard link is dropped.
+            # - name: GRAFANA_LOKI_DS_UID
+            #   value: ""
+            # - name: GRAFANA_PROMETHEUS_DS_UID
+            #   value: ""
+            # - name: GRAFANA_TEMPO_DS_UID
+            #   value: ""
+            # - name: GRAFANA_APM_DASHBOARD
+            #   value: ""
+            # - name: GRAFANA_K8S_OVERVIEW_DASHBOARD
+            #   value: ""
+            # - name: GRAFANA_K8S_POD_DASHBOARD
+            #   value: ""
           startupProbe:
             httpGet:
               path: /healthz

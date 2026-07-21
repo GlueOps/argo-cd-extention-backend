@@ -113,3 +113,28 @@ test('regex metacharacters in a workload name are escaped, not interpreted', () 
   // The dot must be escaped so it cannot match an arbitrary character.
   assert.equal(p.get('var-primary_label'), 'service_name|=~|a\\.b.*');
 });
+
+test('a literal pipe in an inferred name cannot corrupt the Drilldown field split', () => {
+  // `|` is the Drilldown `label|op|value` delimiter. Real k8s names never contain it,
+  // but an inferred-from-header name (e.g. header `argocd:my|app`) could. It must be
+  // stripped so the value stays a single field.
+  const logs = paramsOf(buildGrafanaLogsUrl('my|app'));
+  assert.equal(logs.get('var-primary_label').split('|').length, 3);
+  assert.equal(logs.get('var-primary_label'), 'service_name|=~|myapp.*');
+
+  const metrics = paramsOf(buildGrafanaMetricsUrl('ns|x', 'my|app', 'deployment'));
+  metrics.getAll('var-filters').forEach(f => assert.equal(f.split('|').length, 3));
+  assert.deepEqual(metrics.getAll('var-filters'), ['namespace|=|nsx', 'pod|=~|myapp.*']);
+
+  const traces = paramsOf(buildGrafanaTracesUrl('nonprod', 'my|app'));
+  assert.equal(traces.get('var-filters').split('|').length, 3);
+  assert.equal(traces.get('var-filters'), 'resource.service.name|=|myapp');
+});
+
+test('platform dashboard links carry a scope so the caller can qualify/dedupe them', () => {
+  const links = buildPlatformDashboardLinks('nonprod', 'checkout');
+  assert.deepEqual(
+    links.map(l => [l.label, l.scope]),
+    [['APM Overview', 'workload'], ['Kubernetes Overview', 'namespace'], ['Kubernetes POD Overview', 'workload']]
+  );
+});

@@ -99,7 +99,6 @@ const VAULT_BASE_URL = (process.env.VAULT_BASE_URL || '').trim().replace(/\/$/, 
 const DEPLOYMENT_CONFIG_REPO_URL = (process.env.DEPLOYMENT_CONFIG_REPO_URL || '').trim().replace(/\/$/, '');
 const CONFIG_REPO_LOCAL_ROOT = (process.env.CONFIG_REPO_LOCAL_ROOT || '').trim();
 const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
-const ARGOCD_APP_NAMESPACES = (process.env.ARGOCD_APP_NAMESPACES || 'argocd,glueops-core').split(',').map(s => s.trim()).filter(Boolean);
 // Use ?? (not ||) so that only an UNSET var falls back to the default. An
 // explicitly empty value (e.g. `ALLOWED_NAMESPACES=""`, or a Helm value that
 // renders to "") must NOT silently become the "*" allow-all default — it fails
@@ -158,6 +157,13 @@ const GRAFANA_K8S_POD_DASHBOARD = (process.env.GRAFANA_K8S_POD_DASHBOARD || '').
 // Leave unset for single-cluster Grafana; set it when one Grafana serves multiple
 // clusters that share namespace/workload names (otherwise the link is ambiguous).
 const CLUSTER_NAME = (process.env.CLUSTER_NAME || '').trim();
+
+// Upper bound on the number of distinct config-repo value files read per /api/links
+// request. valueFiles comes from the (untrusted, uncapped) Application spec and each
+// entry is a token-authenticated GitHub fetch, so an app declaring hundreds of them
+// could make one request pathologically slow and burn the shared GITHUB_TOKEN rate
+// limit for every tenant. Cap the work and log what was dropped (never silently).
+const MAX_CONFIG_VALUE_FILES = requirePositiveInt('MAX_CONFIG_VALUE_FILES', 50);
 
 // Validate configured URLs are well-formed if provided (see assertHttpBaseUrl).
 // PROMETHEUS_BASE_URL/TEMPO_BASE_URL are the two dereferenced at request time
@@ -396,6 +402,16 @@ function escapeRegexLiteral(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Grafana Drilldown adhoc filters use `<label>|<op>|<value>` with `|` as the field
+// delimiter, so a literal `|` inside a value corrupts the 3-field split. A real
+// Kubernetes workload/namespace name can never contain `|`; the only way one reaches
+// here is the inferred-from-header fallback for an unresolved app (e.g. a header
+// `argocd:my|app` under an ALLOWED_NAMESPACES=* deployment). Strip the delimiter so
+// the filter stays well-formed — a no-op for every real name.
+function stripFilterDelimiter(value) {
+  return String(value).replace(/\|/g, '');
+}
+
 // Build a Grafana app-plugin (Drilldown) URL: /a/<plugin>/<view>?<params>.
 function buildGrafanaAppUrl(pluginId, view, params) {
   if (!GRAFANA_BASE_URL || !pluginId) return '';
@@ -436,7 +452,7 @@ function buildGrafanaLogsUrl(workloadName) {
       'var-patterns': '',
       'var-lineFilterV2': '',
       'var-lineFilters': '',
-      'var-primary_label': `service_name|=~|${escapeRegexLiteral(workloadName)}.*`
+      'var-primary_label': `service_name|=~|${escapeRegexLiteral(stripFilterDelimiter(workloadName))}.*`
     });
   }
   return buildGrafanaDashboardUrl(GRAFANA_LOGS_DASHBOARD, {
@@ -456,8 +472,8 @@ function buildGrafanaMetricsUrl(namespace, workloadName, workloadType) {
     // the workload's pods (prefix regex -- pod names carry replicaset/ordinal
     // suffixes, so an exact match would select nothing).
     const filters = [];
-    if (namespace) filters.push(`namespace|=|${namespace}`);
-    filters.push(`pod|=~|${escapeRegexLiteral(workloadName)}.*`);
+    if (namespace) filters.push(`namespace|=|${stripFilterDelimiter(namespace)}`);
+    filters.push(`pod|=~|${escapeRegexLiteral(stripFilterDelimiter(workloadName))}.*`);
     return buildGrafanaAppUrl('grafana-metricsdrilldown-app', 'drilldown', {
       from: 'now-1h',
       to: 'now',
@@ -505,7 +521,7 @@ function buildGrafanaTracesUrl(namespace, workloadName) {
       timezone: 'browser',
       'var-ds': GRAFANA_TEMPO_DS_UID,
       'var-primarySignal': 'nestedSetParent<0',
-      'var-filters': `resource.service.name|=|${workloadName}`,
+      'var-filters': `resource.service.name|=|${stripFilterDelimiter(workloadName)}`,
       'var-metric': 'rate',
       'var-groupBy': 'resource.service.name',
       'var-spanListColumns': '',
@@ -553,7 +569,10 @@ function buildPlatformDashboardLinks(namespace, workloadName) {
       orgId: '1',
       'var-app': workloadName
     });
-    if (url) links.push({ url, label: 'APM Overview' });
+    // scope marks whether the link varies per workload (var-app) or only per
+    // namespace: the caller qualifies workload-scoped labels with the workload name
+    // and dedupes namespace-scoped links (identical across workloads) by URL.
+    if (url) links.push({ url, label: 'APM Overview', scope: 'workload' });
   }
 
   if (GRAFANA_K8S_OVERVIEW_DASHBOARD && namespace) {
@@ -561,7 +580,7 @@ function buildPlatformDashboardLinks(namespace, workloadName) {
       orgId: '1',
       'var-namespace': namespace
     });
-    if (url) links.push({ url, label: 'Kubernetes Overview' });
+    if (url) links.push({ url, label: 'Kubernetes Overview', scope: 'namespace' });
   }
 
   if (GRAFANA_K8S_POD_DASHBOARD && workloadName) {
@@ -579,10 +598,23 @@ function buildPlatformDashboardLinks(namespace, workloadName) {
       // so a regex or a stale pod name selects nothing. Leaving it unset lets the
       // dashboard pick a live pod from the workload we did select.
     });
-    if (url) links.push({ url, label: 'Kubernetes POD Overview' });
+    if (url) links.push({ url, label: 'Kubernetes POD Overview', scope: 'workload' });
   }
 
   return links;
+}
+
+// Collapse links that resolve to the identical URL, keeping the first. Two workloads
+// with the same name in different namespaces (logs are keyed on name only) or a
+// namespace-scoped dashboard emitted once per workload would otherwise produce
+// byte-identical duplicate dropdown entries. Matches the vault-secrets category,
+// which already dedupes by URL.
+function dedupeLinksByUrl(links) {
+  const byUrl = new Map();
+  links.forEach(link => {
+    if (link && link.url && !byUrl.has(link.url)) byUrl.set(link.url, link);
+  });
+  return Array.from(byUrl.values());
 }
 
 function labelFromSecretPath(secretPath) {
@@ -630,7 +662,15 @@ function collectAppSpecificValueFiles(appObj) {
     const key = `${normalizeGitRepoUrl(file.repoUrl)}|${file.revision}|${file.path}`;
     if (!uniq.has(key)) uniq.set(key, file);
   });
-  return Array.from(uniq.values());
+  const deduped = Array.from(uniq.values());
+  // Cap the per-request fetch fan-out; log (never silently drop) what was skipped so
+  // an operator can see why some config-derived Vault links are missing.
+  if (deduped.length > MAX_CONFIG_VALUE_FILES) {
+    const appName = appObj && appObj.metadata && typeof appObj.metadata.name === 'string' ? appObj.metadata.name : 'unknown';
+    console.warn(`[WARN] app ${appName}: ${deduped.length} config value files exceed MAX_CONFIG_VALUE_FILES=${MAX_CONFIG_VALUE_FILES}; reading the first ${MAX_CONFIG_VALUE_FILES}, config-derived Vault links from the rest are omitted`);
+    return deduped.slice(0, MAX_CONFIG_VALUE_FILES);
+  }
+  return deduped;
 }
 
 async function fetchText(url, headers) {
@@ -861,39 +901,26 @@ async function getArgoApplication(namespace, appName) {
   const normalizedAppName = asNonEmptyString(appName);
   if (!normalizedNamespace || !normalizedAppName) return null;
 
-  const candidateNamespaces = [];
-  candidateNamespaces.push(normalizedNamespace);
-  ARGOCD_APP_NAMESPACES.forEach(ns => {
-    if (ns && !candidateNamespaces.includes(ns)) candidateNamespaces.push(ns);
-  });
-
-  // Query the candidate namespaces CONCURRENTLY. Done sequentially, a wedged
-  // apiserver would stack REQUEST_TIMEOUT_MS once per namespace (plus the cluster
-  // fallback below), so /api/links could hang for ~N× the timeout — exactly what
-  // withTimeout is meant to prevent. Running them in parallel bounds the namespaced
-  // phase to a single timeout.
-  const namespacedResults = await Promise.all(
-    candidateNamespaces.map(ns =>
-      withTimeout(
-        k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', ns, 'applications', normalizedAppName),
-        `getArgoApplication(${ns})`
-      ).then(
-        response => (response && response.body && typeof response.body === 'object' ? response.body : null),
-        err => {
-          logDebug('getArgoApplication namespaced lookup failed', { namespace: ns, message: err.message });
-          return null;
-        }
-      )
-    )
+  // Argo CD's Argocd-Application-Name header is `namespace:appName`, where the
+  // namespace IS the Application CR's own namespace. A namespaced get() returns an
+  // object whose metadata.namespace equals the namespace queried, so the strict
+  // requested-namespace match below can only ever be satisfied by querying the
+  // requested namespace itself — probing any other namespace can never contribute a
+  // result and only adds apiserver load + 404 log noise. So query just the requested
+  // namespace, then fall back to a cluster-wide list for transient failures.
+  const direct = await withTimeout(
+    k8sCustomObjectsApi.getNamespacedCustomObject('argoproj.io', 'v1alpha1', normalizedNamespace, 'applications', normalizedAppName),
+    `getArgoApplication(${normalizedNamespace})`
+  ).then(
+    response => (response && response.body && typeof response.body === 'object' ? response.body : null),
+    err => {
+      logDebug('getArgoApplication namespaced lookup failed', { namespace: normalizedNamespace, message: err.message });
+      return null;
+    }
   );
-  // Accept ONLY a result whose metadata.namespace equals the requested namespace.
-  // The candidate list also probes ARGOCD_APP_NAMESPACES (e.g. argocd,glueops-core),
-  // so if the requested-namespace lookup transiently fails while a same-named
-  // Application exists in a fallback namespace, a bare "first non-null" pick would
-  // silently return a DIFFERENT tenant's Application — the exact cross-tenant leak
-  // the cluster-wide fallback below already guards against. Apply the same
-  // name+namespace check here so the two resolution paths can't diverge.
-  const matched = selectApplicationForNamespace(namespacedResults, normalizedNamespace);
+  // Still gate on name+namespace (via the shared selector) so the direct-get and the
+  // cluster-list paths can't diverge on the isolation rule.
+  const matched = selectApplicationForNamespace([direct], normalizedNamespace);
   if (matched) return matched;
 
   try {
@@ -1332,35 +1359,39 @@ app.get('/api/links', asyncHandler(async (req, res) => {
   const categories = [];
 
   if (GRAFANA_BASE_URL) {
-    const logsLinks = workloads
+    const logsLinks = dedupeLinksByUrl(workloads
       .map(w => ({ url: buildGrafanaLogsUrl(w.name), label: w.name }))
-      .filter(link => link.url);
+      .filter(link => link.url));
     if (logsLinks.length > 0) {
       categories.push({ id: 'logs', label: 'Logs', icon: '📋', status: workloadStatus, links: logsLinks });
     }
 
-    const tracesLinks = workloads
+    const tracesLinks = dedupeLinksByUrl(workloads
       .map(w => ({ url: buildGrafanaTracesUrl(w.namespace || destinationNamespace, w.name), label: w.name }))
-      .filter(link => link.url);
+      .filter(link => link.url));
     if (tracesLinks.length > 0) {
       categories.push({ id: 'traces', label: 'Traces', icon: '⏱️', status: workloadStatus, links: tracesLinks });
     }
 
-    const metricsLinks = workloads
+    const metricsLinks = dedupeLinksByUrl(workloads
       .map(w => ({ url: buildGrafanaMetricsUrl(w.namespace || destinationNamespace, w.name, w.type), label: w.name }))
-      .filter(link => link.url);
+      .filter(link => link.url));
     if (metricsLinks.length > 0) {
       categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: workloadStatus, links: metricsLinks });
     }
 
-    // Platform dashboards. One workload yields one set of dashboard links; with
-    // several workloads the label is qualified so two workloads' "APM Overview"
-    // entries stay distinguishable in the dropdown.
+    // Platform dashboards. A workload-scoped dashboard (APM var-app, POD var-workload)
+    // is distinct per workload, so its label is qualified with the workload name when
+    // there are several. A namespace-scoped dashboard (Kubernetes Overview) is byte-
+    // identical across workloads in the same namespace, so it is deduped by URL and
+    // its label left unqualified (a "— <workload>" suffix would falsely imply scoping).
     const multipleWorkloads = workloads.length > 1;
-    const dashboardLinks = workloads.flatMap(w =>
-      buildPlatformDashboardLinks(w.namespace || destinationNamespace, w.name)
-        .map(link => ({ ...link, label: multipleWorkloads ? `${link.label} — ${w.name}` : link.label }))
-    );
+    const dashboardLinks = dedupeLinksByUrl(workloads.flatMap(w =>
+      buildPlatformDashboardLinks(w.namespace || destinationNamespace, w.name).map(link => ({
+        url: link.url,
+        label: (multipleWorkloads && link.scope === 'workload') ? `${link.label} — ${w.name}` : link.label
+      }))
+    ));
     if (dashboardLinks.length > 0) {
       categories.push({ id: 'dashboards', label: 'Dashboards', icon: '📊', status: workloadStatus, links: dashboardLinks });
     }
@@ -1611,5 +1642,6 @@ module.exports = {
   buildGrafanaTracesUrl,
   buildPlatformDashboardLinks,
   escapeRegexLiteral,
+  dedupeLinksByUrl,
   __setK8sClientsForTest
 };

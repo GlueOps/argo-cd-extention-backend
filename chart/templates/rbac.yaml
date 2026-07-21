@@ -8,8 +8,8 @@
 # argoproj.io Applications: get + list, granted CLUSTER-WIDE (always).
 #
 # src/server.js's getArgoApplication() first tries a namespaced get() against
-# the request's namespace and each ARGOCD_APP_NAMESPACES entry, then falls
-# back to a cluster-wide listClusterCustomObject() when those all miss. That
+# the request's namespace, then falls back to a cluster-wide
+# listClusterCustomObject() when that misses. That
 # fallback only succeeds with a ClusterRole, so Applications get/list is
 # granted cluster-wide here regardless of .Values.allowedNamespaces (a
 # namespace-scoped Role cannot authorize a cluster-wide list). Argo CD
@@ -41,7 +41,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ $saName | quote }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Release.Namespace | quote }}
 {{- if eq (trim $rbacNamespaces) "*" }}
 ---
 # -----------------------------------------------------------------------------
@@ -84,7 +84,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ $saName | quote }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Release.Namespace | quote }}
 {{- else }}
 {{- range $ns := (splitList "," $rbacNamespaces) }}
 {{- $ns := trim $ns }}
@@ -129,7 +129,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ $saName | quote }}
-    namespace: {{ $.Release.Namespace }}
+    namespace: {{ $.Release.Namespace | quote }}
 {{- end }}
 {{- end }}
 {{- end }}
