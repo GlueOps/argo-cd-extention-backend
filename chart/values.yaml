@@ -70,16 +70,21 @@ allowedDestNamespaces: ""
 
 env:
   logLevel: "INFO" # INFO | DEBUG
-  requestTimeoutMs: "8000"
+  # OPTIONAL knobs below default to empty and are OMITTED from the container when
+  # empty, so the app applies its own built-in default (shown in parentheses) --
+  # the same behavior the raw manifests rely on. Set a value only to override.
+  requestTimeoutMs: "" # app default: 8000 (ms)
   prometheusBaseUrl: ""
   tempoBaseUrl: ""
-  tempoSearchPath: "/api/search"
+  tempoSearchPath: "" # app default: /api/search
   grafanaBaseUrl: ""
   vaultBaseUrl: ""
   deploymentConfigRepoUrl: ""
   configRepoLocalRoot: ""
-  grafanaLogsDashboard: ""
-  grafanaMetricsDashboard: ""
+  # Max distinct config-repo value files read per request. app default: 50.
+  maxConfigValueFiles: ""
+  grafanaLogsDashboard: "" # app default: tBmi6B0Vz/loki-workload-logs
+  grafanaMetricsDashboard: "" # app default: a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload
   grafanaTracesDashboard: ""
   # Optional cluster identifier used in Grafana dashboard template vars when
   # one Grafana instance serves multiple clusters. Leave empty for
