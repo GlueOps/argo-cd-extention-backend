@@ -5,6 +5,11 @@
        with InvalidImageName. Fail the render instead, matching chart/README's claim. */ -}}
 {{- if eq (trim .Values.image.tag) "" }}{{ fail "image.tag must be a non-empty string; it renders directly into the image reference" }}{{- end }}
 {{- if eq (trim .Values.image.repository) "" }}{{ fail "image.repository must be a non-empty string; it renders directly into the image reference" }}{{- end }}
+{{- /* Reject surrounding whitespace too: the value is rendered UNTRIMMED into the
+       image reference below, so a padded tag like " v1" would emit an invalid ref
+       ("repo: v1") that fails at pull time -- the exact failure this guard prevents. */ -}}
+{{- if ne .Values.image.tag (trim .Values.image.tag) }}{{ fail "image.tag must not have leading/trailing whitespace; it renders directly into the image reference" }}{{- end }}
+{{- if ne .Values.image.repository (trim .Values.image.repository) }}{{ fail "image.repository must not have leading/trailing whitespace; it renders directly into the image reference" }}{{- end }}
 {{- /* These render into env vars the app parses as comma-separated lists. Assert them
        here as well as in rbac.yaml: this Deployment renders even with rbac.create=false,
        and `| quote` would otherwise coerce a mistyped list into ALLOWED_NAMESPACES="[a b]"
@@ -186,6 +191,9 @@ spec:
             {{- end }}
             {{- /* Escape hatch for any env var not modeled above (e.g. a new server
                    knob), so the chart never has to be forked just to set one. */ -}}
+            {{- if and .Values.extraEnv (not (kindIs "slice" .Values.extraEnv)) }}
+            {{- fail (printf "extraEnv must be a list of core-v1 EnvVar entries, got %s" (kindOf .Values.extraEnv)) }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

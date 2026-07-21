@@ -276,6 +276,16 @@ function normalizeGitRepoUrl(repoUrl) {
   return repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
 }
 
+// Compare two git repo URLs for identity. GitHub owner/repo are case-insensitive and
+// Argo CD accepts .git/trailing-slash spelling variants, so a `repoURL` that differs
+// only in case from DEPLOYMENT_CONFIG_REPO_URL is the SAME repo — comparing on the raw
+// normalized form would case-sensitively mismatch and silently drop every config-
+// derived Vault link. normalizeGitRepoUrl preserves case (it also builds emitted link
+// URLs); only this equality check folds case.
+function isSameRepoUrl(a, b) {
+  return normalizeGitRepoUrl(a).toLowerCase() === normalizeGitRepoUrl(b).toLowerCase();
+}
+
 function asNonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : '';
 }
@@ -617,6 +627,28 @@ function dedupeLinksByUrl(links) {
   return Array.from(byUrl.values());
 }
 
+// Assemble the `dashboards` category links for a set of workloads. A workload-scoped
+// dashboard (APM var-app, POD var-workload) is distinct per workload, so its label is
+// qualified with the workload name when there are several. A namespace-scoped dashboard
+// (Kubernetes Overview) is identical across workloads WITHIN a namespace (deduped by
+// URL) but differs ACROSS namespaces, so it is qualified with the namespace when
+// workloads span several — otherwise two distinct-namespace links would collide on one
+// ambiguous "Kubernetes Overview" label. Pure + exported so the labeling rule is
+// unit-testable.
+function buildDashboardCategoryLinks(workloads, destinationNamespace) {
+  const multipleWorkloads = workloads.length > 1;
+  const multipleNamespaces = new Set(workloads.map(w => w.namespace || destinationNamespace)).size > 1;
+  return dedupeLinksByUrl(workloads.flatMap(w => {
+    const ns = w.namespace || destinationNamespace;
+    return buildPlatformDashboardLinks(ns, w.name).map(link => {
+      let label = link.label;
+      if (link.scope === 'workload' && multipleWorkloads) label = `${link.label} — ${w.name}`;
+      else if (link.scope === 'namespace' && multipleNamespaces) label = `${link.label} — ${ns}`;
+      return { url: link.url, label };
+    });
+  }));
+}
+
 function labelFromSecretPath(secretPath) {
   return typeof secretPath === 'string' ? secretPath.trim().replace(/^secret\//, '').replace(/^\/+|\/+$/g, '') : '';
 }
@@ -647,7 +679,7 @@ function collectAppSpecificValueFiles(appObj) {
       // Application can reference arbitrary source repoURLs; without this scope the
       // backend would send GITHUB_TOKEN to fetch from any repo an Application names
       // (confused-deputy read of out-of-scope repos). Requires DEPLOYMENT_CONFIG_REPO_URL.
-      if (!DEPLOYMENT_CONFIG_REPO_URL || normalizeGitRepoUrl(refSource.repoURL) !== normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) return;
+      if (!DEPLOYMENT_CONFIG_REPO_URL || !isSameRepoUrl(refSource.repoURL, DEPLOYMENT_CONFIG_REPO_URL)) return;
       const revision = typeof refSource.targetRevision === 'string' && refSource.targetRevision.trim() !== '' ? refSource.targetRevision.trim() : 'main';
       files.push({
         repoUrl: refSource.repoURL,
@@ -726,7 +758,7 @@ async function readConfigRepoFileText(repoUrl, revision, relativePath) {
     logDebug('unsafe config repo relativePath; skipping', { relativePath });
     return '';
   }
-  if (CONFIG_REPO_LOCAL_ROOT && normalizeGitRepoUrl(repoUrl) === normalizeGitRepoUrl(DEPLOYMENT_CONFIG_REPO_URL)) {
+  if (CONFIG_REPO_LOCAL_ROOT && isSameRepoUrl(repoUrl, DEPLOYMENT_CONFIG_REPO_URL)) {
     // relativePath originates from the Application spec's valueFiles; a "../" in it
     // must not be able to read files outside the configured local root. A lexical
     // prefix check alone is insufficient: a symlink *inside* the root can point
@@ -1380,18 +1412,7 @@ app.get('/api/links', asyncHandler(async (req, res) => {
       categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: workloadStatus, links: metricsLinks });
     }
 
-    // Platform dashboards. A workload-scoped dashboard (APM var-app, POD var-workload)
-    // is distinct per workload, so its label is qualified with the workload name when
-    // there are several. A namespace-scoped dashboard (Kubernetes Overview) is byte-
-    // identical across workloads in the same namespace, so it is deduped by URL and
-    // its label left unqualified (a "— <workload>" suffix would falsely imply scoping).
-    const multipleWorkloads = workloads.length > 1;
-    const dashboardLinks = dedupeLinksByUrl(workloads.flatMap(w =>
-      buildPlatformDashboardLinks(w.namespace || destinationNamespace, w.name).map(link => ({
-        url: link.url,
-        label: (multipleWorkloads && link.scope === 'workload') ? `${link.label} — ${w.name}` : link.label
-      }))
-    ));
+    const dashboardLinks = buildDashboardCategoryLinks(workloads, destinationNamespace);
     if (dashboardLinks.length > 0) {
       categories.push({ id: 'dashboards', label: 'Dashboards', icon: '📊', status: workloadStatus, links: dashboardLinks });
     }
@@ -1641,6 +1662,7 @@ module.exports = {
   buildGrafanaMetricsUrl,
   buildGrafanaTracesUrl,
   buildPlatformDashboardLinks,
+  buildDashboardCategoryLinks,
   escapeRegexLiteral,
   dedupeLinksByUrl,
   __setK8sClientsForTest

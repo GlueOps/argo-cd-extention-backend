@@ -100,8 +100,8 @@ env:
   grafanaK8sPodDashboard: ""
 
 # Additional raw environment variables appended verbatim to the container, for
-# any server knob not modeled under `env` above. Standard core-v1 EnvVar entries.
-# Example:
+# any server knob not modeled under `env` above. Must be a LIST of standard
+# core-v1 EnvVar entries; `value` is a string field, so quote it. Example:
 #   extraEnv:
 #     - name: SOME_NEW_FLAG
 #       value: "1"

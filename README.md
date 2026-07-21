@@ -100,9 +100,11 @@ Response contract notes for UI consumers:
 - `vault-secrets` includes a numeric `count`.
 - For the `logs`, `metrics` and `traces` categories, one link is emitted **per
   discovered workload** and `label` is the workload name. The `dashboards` category
-  emits platform-dashboard links (`APM Overview`, `Kubernetes Overview`, `Kubernetes
-  POD Overview`) whose labels are the dashboard names (suffixed with the workload name
-  only when more than one workload is discovered), not the workload name.
+  emits platform-dashboard links whose labels are the dashboard names, not the workload
+  name: per-workload dashboards (`APM Overview`, `Kubernetes POD Overview`) are suffixed
+  with the workload name when more than one workload is discovered, while the
+  namespace-scoped `Kubernetes Overview` is emitted once per namespace (deduped by URL)
+  and suffixed with the namespace only when workloads span more than one.
 - Error responses use `{ "status": "error", "errorType": "...", "error": "..." }`.
 - Responses are `Cache-Control: no-store`; `/api/links` sets
   `Vary: Argocd-Application-Name, Argocd-Project-Name` and the proxy routes set

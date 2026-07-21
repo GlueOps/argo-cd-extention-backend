@@ -74,6 +74,20 @@ test('a proxied base URL with a query string is rejected at boot', () => {
   assert.match(res.stderr, /\[FATAL\] PROMETHEUS_BASE_URL must not contain a query string or fragment/);
 });
 
+test('a proxied base URL with a fragment is rejected at boot', () => {
+  const res = boot({ TEMPO_BASE_URL: 'http://tempo.tracing:3200/#frag' });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /\[FATAL\] TEMPO_BASE_URL must not contain a query string or fragment/);
+});
+
+// A path-only base (no query/fragment) is legitimate — buildUrl appends to it — so it
+// must boot cleanly, confirming the guard rejects only query/fragment, not any path.
+test('a proxied base URL with a path but no query/fragment boots cleanly', () => {
+  const res = boot({ PROMETHEUS_BASE_URL: 'http://prometheus.monitoring:9090/prometheus' });
+  assert.doesNotMatch(res.stderr, /\[FATAL\]/);
+  assert.match(res.stdout, /\[CONFIG\]/);
+});
+
 // Whitespace-only TEMPO_SEARCH_PATH is truthy, so it skips the `|| '/api/search'`
 // default and trims to '', which would resolve to the Tempo base ROOT instead of the
 // search endpoint. It must fall back to the default like an unset value.

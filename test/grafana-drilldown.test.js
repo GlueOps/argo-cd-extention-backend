@@ -18,6 +18,7 @@ const {
   buildGrafanaMetricsUrl,
   buildGrafanaTracesUrl,
   buildPlatformDashboardLinks,
+  buildDashboardCategoryLinks,
   escapeRegexLiteral
 } = require('../src/server');
 
@@ -137,4 +138,37 @@ test('platform dashboard links carry a scope so the caller can qualify/dedupe th
     links.map(l => [l.label, l.scope]),
     [['APM Overview', 'workload'], ['Kubernetes Overview', 'namespace'], ['Kubernetes POD Overview', 'workload']]
   );
+  // The internal `scope` marker must not leak into the emitted category.
+  buildDashboardCategoryLinks([{ name: 'checkout', namespace: 'nonprod' }], 'nonprod')
+    .forEach(l => assert.deepEqual(Object.keys(l).sort(), ['label', 'url']));
+});
+
+test('dashboard category: single workload leaves labels unqualified', () => {
+  const links = buildDashboardCategoryLinks([{ name: 'checkout', namespace: 'nonprod' }], 'nonprod');
+  assert.deepEqual(links.map(l => l.label),
+    ['APM Overview', 'Kubernetes Overview', 'Kubernetes POD Overview']);
+});
+
+test('dashboard category: two workloads in ONE namespace — workload labels qualified, namespace dashboard deduped', () => {
+  const links = buildDashboardCategoryLinks(
+    [{ name: 'web', namespace: 'nonprod' }, { name: 'worker', namespace: 'nonprod' }], 'nonprod');
+  const labels = links.map(l => l.label);
+  // Workload-scoped are suffixed with the workload name; the namespace-scoped
+  // "Kubernetes Overview" appears exactly once, unqualified (both workloads share it).
+  assert.deepEqual(labels, [
+    'APM Overview — web', 'Kubernetes Overview', 'Kubernetes POD Overview — web',
+    'APM Overview — worker', 'Kubernetes POD Overview — worker'
+  ]);
+  assert.equal(labels.filter(l => l === 'Kubernetes Overview').length, 1);
+});
+
+test('dashboard category: workloads spanning TWO namespaces — namespace dashboards stay distinguishable', () => {
+  const links = buildDashboardCategoryLinks(
+    [{ name: 'web', namespace: 'ns1' }, { name: 'api', namespace: 'ns2' }], 'ns1');
+  const overview = links.filter(l => l.label.startsWith('Kubernetes Overview'));
+  // Regression guard: previously both cross-namespace links were labeled bare
+  // "Kubernetes Overview" (ambiguous). They must now be namespace-qualified and distinct.
+  assert.deepEqual(overview.map(l => l.label).sort(),
+    ['Kubernetes Overview — ns1', 'Kubernetes Overview — ns2']);
+  assert.equal(new Set(overview.map(l => l.url)).size, 2);
 });

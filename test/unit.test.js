@@ -203,6 +203,20 @@ test('buildGitTreeUrl distinguishes dirs from files without misreading dotted di
   assert.match(buildGitTreeUrl(repo, 'main', 'apps/v2.1'), /\/tree\/main\/apps\/v2\.1$/);
 });
 
+test('buildGitTreeUrl normalizes .git/trailing-slash spellings without lowercasing owner/repo', () => {
+  // Argo CD treats these four as the same repo; the emitted base must be identical AND
+  // preserve the owner/repo casing (GitHub raw/tree paths are case-sensitive on the path).
+  const expected = 'https://github.com/GlueOps/MyRepo/tree/main/apps/x';
+  for (const repo of [
+    'https://github.com/GlueOps/MyRepo',
+    'https://github.com/GlueOps/MyRepo.git',
+    'https://github.com/GlueOps/MyRepo/',
+    'https://github.com/GlueOps/MyRepo.GIT/'
+  ]) {
+    assert.equal(buildGitTreeUrl(repo, 'main', 'apps/x'), expected, `spelling: ${repo}`);
+  }
+});
+
 test('buildVaultSecretUrl targets the KV show view at the remoteRef key path', () => {
   assert.equal(
     buildVaultSecretUrl('secret/team/app/db'),

@@ -50,13 +50,11 @@ test('a padded DEPLOYMENT_CONFIG_REPO_URL still matches an Application repoURL',
   }]);
 });
 
-// An app can declare an unbounded number of value files; each is a token-authenticated
-// GitHub fetch, so the collector caps the fan-out at MAX_CONFIG_VALUE_FILES (default 50)
-// rather than letting one app burn the shared rate limit / hang the request.
-test('collectAppSpecificValueFiles caps the number of value files it returns', () => {
+// Build an appObj with `n` distinct value files under the configured config repo.
+function appWithValueFiles(n) {
   const valueFiles = [];
-  for (let i = 0; i < 120; i++) valueFiles.push(`$values/apps/team-a/v${i}/values.yaml`);
-  const appObj = {
+  for (let i = 0; i < n; i++) valueFiles.push(`$values/apps/team-a/v${i}/values.yaml`);
+  return {
     metadata: { name: 'team-a' },
     spec: {
       sources: [
@@ -65,10 +63,55 @@ test('collectAppSpecificValueFiles caps the number of value files it returns', (
       ]
     }
   };
+}
 
-  const result = collectAppSpecificValueFiles(appObj);
-  assert.equal(result.length, 50);
+// Capture console.warn for the duration of `fn` so the observability guarantee (never
+// silently drop) can be asserted, not just the cap itself.
+function captureWarn(fn) {
+  const original = console.warn;
+  const messages = [];
+  console.warn = (...args) => messages.push(args.join(' '));
+  try {
+    return { result: fn(), messages };
+  } finally {
+    console.warn = original;
+  }
+}
+
+// An app can declare an unbounded number of value files; each is a token-authenticated
+// GitHub fetch, so the collector caps the fan-out at MAX_CONFIG_VALUE_FILES (default 50)
+// rather than letting one app burn the shared rate limit / hang the request.
+test('collectAppSpecificValueFiles caps at MAX and WARNs, but not at the boundary', () => {
+  // Exactly at the cap (50): no truncation, no warning.
+  const atCap = captureWarn(() => collectAppSpecificValueFiles(appWithValueFiles(50)));
+  assert.equal(atCap.result.length, 50);
+  assert.deepEqual(atCap.messages, [], 'no warning when count == MAX');
+
+  // One over (51): capped to 50, exactly one WARN naming the cap.
+  const overCap = captureWarn(() => collectAppSpecificValueFiles(appWithValueFiles(51)));
+  assert.equal(overCap.result.length, 50);
+  assert.equal(overCap.messages.length, 1, 'the drop must be logged, never silent');
+  assert.match(overCap.messages[0], /\[WARN\].*MAX_CONFIG_VALUE_FILES=50/);
   // The cap keeps the FIRST N distinct entries in declaration order.
-  assert.equal(result[0].path, 'apps/team-a/v0/values.yaml');
-  assert.equal(result[49].path, 'apps/team-a/v49/values.yaml');
+  assert.equal(overCap.result[0].path, 'apps/team-a/v0/values.yaml');
+  assert.equal(overCap.result[49].path, 'apps/team-a/v49/values.yaml');
+});
+
+// GitHub owner/repo are case-insensitive, so a repoURL differing only in case from
+// DEPLOYMENT_CONFIG_REPO_URL is the same repo and must still be read (else all
+// config-derived Vault links silently drop).
+test('collectAppSpecificValueFiles matches the config repo case-insensitively', () => {
+  const appObj = {
+    spec: {
+      sources: [
+        { ref: 'values', repoURL: 'https://github.com/glueops/Deployment-Configurations.git', targetRevision: 'main' },
+        { repoURL: 'https://github.com/GlueOps/app', helm: { valueFiles: ['$values/apps/team-a/values.yaml'] } }
+      ]
+    }
+  };
+  assert.deepEqual(collectAppSpecificValueFiles(appObj), [{
+    repoUrl: 'https://github.com/glueops/Deployment-Configurations.git',
+    revision: 'main',
+    path: 'apps/team-a/values.yaml'
+  }]);
 });
