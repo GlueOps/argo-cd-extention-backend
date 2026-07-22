@@ -1,3 +1,111 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-extension-backend-api
+  namespace: glueops-core
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+automountServiceAccountToken: true
+---
+# -----------------------------------------------------------------------------
+# argoproj.io Applications: get + list, granted CLUSTER-WIDE.
+#
+# src/server.js's getArgoApplication() first tries a namespaced get() and
+# then falls back to a cluster-wide listClusterCustomObject() when that
+# misses. That fallback only works with a ClusterRole, so this is granted
+# cluster-wide regardless of ALLOWED_NAMESPACES below. Applications describe
+# *what* is deployed, not secret material, so this is considered acceptable
+# read access even in multi-tenant clusters.
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-extension-backend-api-glueops-core-applications
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-extension-backend-api-glueops-core-applications
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-extension-backend-api-glueops-core-applications
+subjects:
+  - kind: ServiceAccount
+    name: argocd-extension-backend-api
+    namespace: glueops-core
+---
+# -----------------------------------------------------------------------------
+# Namespaced Role, scoped to the "nonprod" namespace only -- this backend's
+# pod runs in "glueops-core", but ALLOWED_DEST_NAMESPACES=nonprod below means
+# it only ever serves Applications whose destination namespace is "nonprod", so
+# the actual workload/ExternalSecret discovery calls in src/server.js only
+# ever target "nonprod". (The Application CRs themselves live in argocd/
+# glueops-core -- see ALLOWED_APP_NAMESPACES -- and are read cluster-wide.)
+# src/server.js does NOT read Secret objects. It lists
+# Deployments/StatefulSets/DaemonSets and ExternalSecrets to resolve workload
+# names and Vault secret paths, plus Pods (list only) to resolve one live pod
+# name per workload for the Grafana POD Overview link (var-pod). Pod reads are
+# best-effort: without the pods grant the list 403s, the backend swallows it,
+# and the dashboard auto-selects a pod instead. Scoping this Role to "nonprod"
+# instead of cluster-wide keeps this ServiceAccount's read access confined
+# to just this namespace.
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-extension-backend-api-glueops-core-workloads
+  namespace: nonprod
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["list"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-extension-backend-api-glueops-core-workloads
+  namespace: nonprod
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-extension-backend-api-glueops-core-workloads
+subjects:
+  - kind: ServiceAccount
+    name: argocd-extension-backend-api
+    namespace: glueops-core
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: argocd-extension-backend-api
+  namespace: glueops-core
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-extension-backend-api
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,6 +115,11 @@ metadata:
     app.kubernetes.io/name: argocd-extension-backend-api
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: argocd-extension-backend-api
@@ -15,10 +128,37 @@ spec:
       labels:
         app.kubernetes.io/name: argocd-extension-backend-api
     spec:
+      serviceAccountName: argocd-extension-backend-api
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Prefer (not require) spreading replicas across different nodes.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: argocd-extension-backend-api
       containers:
         - name: argocd-extension-backend-api
-          image: ghcr.io/glueops/argocd-extension-backend-api:v.0.0.1
+          # Keep in step with package.json's version and chart/values.yaml: the
+          # release workflow refuses to publish when the release tag and
+          # package.json disagree. Bump all three together.
+          image: ghcr.io/glueops/argocd-extension-backend-api:v0.1.4
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
               containerPort: 8000
@@ -38,11 +178,42 @@ spec:
               value: "https://vault.nonprod.venus.onglueops.rocks"
             - name: DEPLOYMENT_CONFIG_REPO_URL
               value: "https://github.com/GlueOps/deployment-configurations"
-            - name: ALLOWED_NAMESPACES
+            # ALLOWED_NAMESPACES gates TWO axes; here they differ, so set them
+            # explicitly rather than collapsing both to one value:
+            #  - App-CR namespace (the Argocd-Application-Name header prefix):
+            #    Applications live in argocd/glueops-core, so gating on "nonprod"
+            #    would 403 every real request.
+            #  - Destination namespace (where workload/ExternalSecret reads happen,
+            #    and what the Role below is scoped to): "nonprod".
+            - name: ALLOWED_APP_NAMESPACES
+              value: "argocd,glueops-core"
+            - name: ALLOWED_DEST_NAMESPACES
               value: "nonprod"
-          readinessProbe:
+            # Optional Grafana Drilldown datasource UIDs + platform dashboard UIDs.
+            # Uncomment and set on clusters running the OTEL monitoring stack (see
+            # CONFIGURATION.md). Unset => that signal keeps its classic dashboard /
+            # the dashboard link is dropped.
+            # - name: GRAFANA_LOKI_DS_UID
+            #   value: ""
+            # - name: GRAFANA_PROMETHEUS_DS_UID
+            #   value: ""
+            # - name: GRAFANA_TEMPO_DS_UID
+            #   value: ""
+            # - name: GRAFANA_APM_DASHBOARD
+            #   value: ""
+            # - name: GRAFANA_K8S_OVERVIEW_DASHBOARD
+            #   value: ""
+            # - name: GRAFANA_K8S_POD_DASHBOARD
+            #   value: ""
+          startupProbe:
             httpGet:
               path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -59,6 +230,13 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+          volumeMounts:
+            # readOnlyRootFilesystem requires a writable /tmp for npm/node.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -76,3 +254,41 @@ spec:
       port: 8000
       targetPort: http
       protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argocd-extension-backend-api
+  namespace: glueops-core
+  labels:
+    app.kubernetes.io/name: argocd-extension-backend-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-extension-backend-api
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the Argo CD server may reach this backend. argocd-server performs the
+    # `extensions, invoke` RBAC check before proxying, so this (plus the
+    # Argocd-Application-Name header check in the app) makes the proxy reachable
+    # only through the authenticated extension path -- not by arbitrary pods.
+    #
+    # PRE-APPLY CHECKS (cluster-specific):
+    #   1. Confirm the argocd-server pod label below matches your install.
+    #   2. If your CNI enforces NetworkPolicy on kubelet health probes, add an
+    #      ipBlock rule for the node CIDR(s) so readiness/liveness probes on
+    #      port 8000 are not blocked. Many CNIs (e.g. Cilium) exempt these.
+    - from:
+        # Restrict to argocd-server pods *in the argocd namespace*. A bare
+        # `namespaceSelector: {}` would admit any pod carrying the argocd-server
+        # label in ANY namespace (trivially spoofable), defeating the policy.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argocd
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: argocd-server
+      ports:
+        - protocol: TCP
+          port: 8000

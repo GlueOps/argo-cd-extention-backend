@@ -1,0 +1,273 @@
+{{- include "argocd-extension-backend-api.assertString" (list "image.tag" .Values.image.tag) }}
+{{- include "argocd-extension-backend-api.assertString" (list "image.repository" .Values.image.repository) }}
+{{- /* assertString guards the TYPE only; an empty or whitespace-only string passes it
+       and renders a broken image ref ("repo:" / ": tag ") that fails only at pull time
+       with InvalidImageName. Fail the render instead, matching chart/README's claim. */ -}}
+{{- if eq (trim .Values.image.tag) "" }}{{ fail "image.tag must be a non-empty string; it renders directly into the image reference" }}{{- end }}
+{{- if eq (trim .Values.image.repository) "" }}{{ fail "image.repository must be a non-empty string; it renders directly into the image reference" }}{{- end }}
+{{- /* Reject surrounding whitespace too: the value is rendered UNTRIMMED into the
+       image reference below, so a padded tag like " v1" would emit an invalid ref
+       ("repo: v1") that fails at pull time -- the exact failure this guard prevents. */ -}}
+{{- if ne .Values.image.tag (trim .Values.image.tag) }}{{ fail "image.tag must not have leading/trailing whitespace; it renders directly into the image reference" }}{{- end }}
+{{- if ne .Values.image.repository (trim .Values.image.repository) }}{{ fail "image.repository must not have leading/trailing whitespace; it renders directly into the image reference" }}{{- end }}
+{{- /* These render into env vars the app parses as comma-separated lists. Assert them
+       here as well as in rbac.yaml: this Deployment renders even with rbac.create=false,
+       and `| quote` would otherwise coerce a mistyped list into ALLOWED_NAMESPACES="[a b]"
+       -- which the app splits into one bogus entry and then denies every namespace. */ -}}
+{{- include "argocd-extension-backend-api.assertString" (list "allowedNamespaces" .Values.allowedNamespaces) }}
+{{- include "argocd-extension-backend-api.assertString" (list "allowedAppNamespaces" (.Values.allowedAppNamespaces | default "")) }}
+{{- include "argocd-extension-backend-api.assertString" (list "allowedDestNamespaces" (.Values.allowedDestNamespaces | default "")) }}
+{{- /* replicaCount is consumed twice: rendered raw below, and compared via `int` in
+       poddisruptionbudget.yaml. sprig's `int` returns 0 for an unparseable string, so
+       `replicaCount: "abc"` made that template's `gt (int .Values.replicaCount) 1`
+       false and SILENTLY dropped the PDB -- no error, no PDB, availability guarantee
+       quietly gone. Assert here so a mistyped value fails the render instead. */ -}}
+{{- include "argocd-extension-backend-api.assertIntegral" (list "replicaCount" .Values.replicaCount) }}
+{{- /* service.port renders into int-typed scalars (containerPort, Service port,
+       NetworkPolicy port) and the PORT env. A non-integral value (e.g. 8000.5) passes
+       helm lint and client dry-run, then is rejected server-side. Assert it here (the
+       Deployment always renders, so this gates the whole chart) and bound it to a
+       valid TCP port, mirroring src/server.js's PORT range check. */ -}}
+{{- include "argocd-extension-backend-api.assertIntegral" (list "service.port" .Values.service.port) }}
+{{- if or (lt (int .Values.service.port) 1) (gt (int .Values.service.port) 65535) }}
+{{- fail (printf "service.port (%v) must be in range 1-65535" .Values.service.port) }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "argocd-extension-backend-api.fullname" . | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "argocd-extension-backend-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "argocd-extension-backend-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "argocd-extension-backend-api.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "argocd-extension-backend-api.serviceAccountName" . | quote }}
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if not .Values.affinity }}
+      # Default spread: no explicit topologySpreadConstraints or affinity was
+      # configured, so prefer (not require) scheduling replicas onto
+      # different nodes.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "argocd-extension-backend-api.selectorLabels" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.env.logLevel | quote }}
+            {{- /* Knobs below are OPTIONAL: left empty they are omitted so the app
+                   falls through to its own built-in default (documented in values.yaml
+                   and README) -- the same thing the raw manifests rely on. Rendering an
+                   empty value here, or pinning the app's default, would only duplicate
+                   that default in a second place and risk drift. */ -}}
+            {{- if .Values.env.requestTimeoutMs }}
+            - name: REQUEST_TIMEOUT_MS
+              value: {{ .Values.env.requestTimeoutMs | quote }}
+            {{- end }}
+            - name: PROMETHEUS_BASE_URL
+              value: {{ .Values.env.prometheusBaseUrl | quote }}
+            - name: TEMPO_BASE_URL
+              value: {{ .Values.env.tempoBaseUrl | quote }}
+            {{- if .Values.env.tempoSearchPath }}
+            - name: TEMPO_SEARCH_PATH
+              value: {{ .Values.env.tempoSearchPath | quote }}
+            {{- end }}
+            - name: GRAFANA_BASE_URL
+              value: {{ .Values.env.grafanaBaseUrl | quote }}
+            - name: VAULT_BASE_URL
+              value: {{ .Values.env.vaultBaseUrl | quote }}
+            - name: DEPLOYMENT_CONFIG_REPO_URL
+              value: {{ .Values.env.deploymentConfigRepoUrl | quote }}
+            {{- if .Values.env.configRepoLocalRoot }}
+            - name: CONFIG_REPO_LOCAL_ROOT
+              value: {{ .Values.env.configRepoLocalRoot | quote }}
+            {{- end }}
+            {{- if .Values.env.maxConfigValueFiles }}
+            - name: MAX_CONFIG_VALUE_FILES
+              value: {{ .Values.env.maxConfigValueFiles | quote }}
+            {{- end }}
+            # Drives both the app's own namespace gating and, indirectly,
+            # the RBAC scope generated by templates/rbac.yaml -- see the
+            # comment on .Values.allowedNamespaces in values.yaml.
+            - name: ALLOWED_NAMESPACES
+              value: {{ .Values.allowedNamespaces | quote }}
+            {{- if .Values.allowedAppNamespaces }}
+            # Overrides ALLOWED_NAMESPACES for the Application-CR namespace (header prefix).
+            - name: ALLOWED_APP_NAMESPACES
+              value: {{ .Values.allowedAppNamespaces | quote }}
+            {{- end }}
+            {{- if .Values.allowedDestNamespaces }}
+            # Overrides ALLOWED_NAMESPACES for spec.destination.namespace (where reads happen).
+            - name: ALLOWED_DEST_NAMESPACES
+              value: {{ .Values.allowedDestNamespaces | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaLogsDashboard }}
+            - name: GRAFANA_LOGS_DASHBOARD
+              value: {{ .Values.env.grafanaLogsDashboard | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaMetricsDashboard }}
+            - name: GRAFANA_METRICS_DASHBOARD
+              value: {{ .Values.env.grafanaMetricsDashboard | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaTracesDashboard }}
+            - name: GRAFANA_TRACES_DASHBOARD
+              value: {{ .Values.env.grafanaTracesDashboard | quote }}
+            {{- end }}
+            {{- if .Values.env.clusterName }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.env.clusterName | quote }}
+            {{- end }}
+            {{- /* Grafana Drilldown datasource UIDs + platform dashboard UIDs. All
+                   optional and empty by default (a link is dropped, not broken, when
+                   unset) -- render only when set so the container env stays clean. */ -}}
+            {{- if .Values.env.grafanaLokiDsUid }}
+            - name: GRAFANA_LOKI_DS_UID
+              value: {{ .Values.env.grafanaLokiDsUid | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaPrometheusDsUid }}
+            - name: GRAFANA_PROMETHEUS_DS_UID
+              value: {{ .Values.env.grafanaPrometheusDsUid | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaTempoDsUid }}
+            - name: GRAFANA_TEMPO_DS_UID
+              value: {{ .Values.env.grafanaTempoDsUid | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaApmDashboard }}
+            - name: GRAFANA_APM_DASHBOARD
+              value: {{ .Values.env.grafanaApmDashboard | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaK8sOverviewDashboard }}
+            - name: GRAFANA_K8S_OVERVIEW_DASHBOARD
+              value: {{ .Values.env.grafanaK8sOverviewDashboard | quote }}
+            {{- end }}
+            {{- if .Values.env.grafanaK8sPodDashboard }}
+            - name: GRAFANA_K8S_POD_DASHBOARD
+              value: {{ .Values.env.grafanaK8sPodDashboard | quote }}
+            {{- end }}
+            {{- /* Static "Other" category links + project exclusion. Each uses `?? default`
+                   in the server, so rendering only-when-set keeps the app's own defaults
+                   (support/docs URLs, skip glueops-core). Use `hasKey` so an operator can
+                   force-DISABLE one with an explicit "" (which fails closed / disables the
+                   skip) -- a plain truthiness guard could never emit that empty value. */ -}}
+            {{- if hasKey .Values.env "supportUrl" }}
+            - name: SUPPORT_URL
+              value: {{ .Values.env.supportUrl | quote }}
+            {{- end }}
+            {{- if hasKey .Values.env "documentationUrl" }}
+            - name: DOCUMENTATION_URL
+              value: {{ .Values.env.documentationUrl | quote }}
+            {{- end }}
+            {{- if hasKey .Values.env "skipProjects" }}
+            - name: SKIP_PROJECTS
+              value: {{ .Values.env.skipProjects | quote }}
+            {{- end }}
+            {{- /* Escape hatch for any env var not modeled above (e.g. a new server
+                   knob), so the chart never has to be forked just to set one. */ -}}
+            {{- if and .Values.extraEnv (not (kindIs "slice" .Values.extraEnv)) }}
+            {{- fail (printf "extraEnv must be a list of core-v1 EnvVar entries, got %s" (kindOf .Values.extraEnv)) }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.githubToken.existingSecretName }}
+            # GITHUB_TOKEN is sensitive; it is only ever sourced from a
+            # pre-existing Secret (never a plain value in values.yaml).
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.githubToken.existingSecretName | quote }}
+                  key: {{ .Values.githubToken.existingSecretKey | quote }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem requires a writable /tmp for npm/node.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,53 @@
+name: Scan released image
+
+# Runs Trivy against the image published by "Build and Release Backend", in its
+# OWN workflow so the scan never shares a job with the packages:write token that
+# release.yml uses to push. This job is read-only.
+#
+# It triggers on completion of the release workflow (rather than on `release:`
+# directly) so the image is guaranteed to already be pushed before we pull it.
+on:
+  workflow_run:
+    workflows: ["Build and Release Backend"]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  scan:
+    # Only scan when the release build actually succeeded (and pushed an image).
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
+        with:
+          # Scan the immutable release tag, NOT :latest. :latest is a moving pointer
+          # that the next release (or a hotfix cut from an older branch) overwrites,
+          # so scanning it can report on a different image than the run that triggered
+          # this one -- attributing a verdict to the wrong build. workflow_run exposes
+          # the triggering run's ref as head_branch, which for a release build is the
+          # release tag.
+          image-ref: ghcr.io/glueops/argocd-extension-backend-api:${{ github.event.workflow_run.head_branch }}
+          format: 'table'
+          # Surface fixable critical CVEs as a failed check.
+          #
+          # Deliberately CRITICAL-only, not CRITICAL,HIGH: the base image's bundled
+          # npm currently vendors undici 6.26.0 (CVE-2026-12151, HIGH, fixable), which
+          # no lockfile change here can address -- the app itself never invokes npm at
+          # runtime and Node's own built-in undici (7.28.0) is already patched. Adding
+          # HIGH today would make this gate fail on every release for a package the
+          # container never executes, and a permanently-red gate gets muted and then
+          # gates nothing. Revisit once the base image ships a patched npm.
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL'

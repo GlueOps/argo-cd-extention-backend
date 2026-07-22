@@ -1,0 +1,60 @@
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+{{- /* A minAvailable >= replicaCount permits zero voluntary disruptions forever:
+       `kubectl drain` on any node hosting a replica hangs, and cluster-autoscaler
+       scale-down and node upgrades stall on this namespace. The enabled/
+       replicaCount>1 guard above already rules out the 1/1 deadlock; fail fast on
+       the sibling case rather than shipping an undrainable PDB.
+
+       Validate by SHAPE, not by Go kind. The previous guard was
+       `and (kindIs "int64" .minAvailable) (ge (int .minAvailable) (int .replicaCount))`,
+       and `kindIs "int64"` made it near-dead code: Helm parses a values FILE via JSON,
+       so `minAvailable: 2` in values.yaml is a float64, not an int64. The guard
+       therefore never fired for the normal path -- only for `--set`. It also exempted
+       `minAvailable: "2"` (a string; this chart's own house style quotes numbers, cf.
+       values.yaml requestTimeoutMs: "8000") and `"100%"` (not a typo at all, but the
+       deliberately supported percentage form). Every one of those still renders raw
+       below for YAML to re-parse as a number, i.e. produced exactly the undrainable
+       PDB this check exists to prevent.
+
+       assertIntegral is type-agnostic (see _helpers.tpl) and `int` normalizes
+       float64/int64/"2" alike, so the comparison now covers every non-percentage
+       form. Percentages are range-checked against 100% in their own branch. */ -}}
+{{- $minAvailable := .Values.podDisruptionBudget.minAvailable }}
+{{- if and (kindIs "string" $minAvailable) (hasSuffix "%" $minAvailable) }}
+{{- $pct := trimSuffix "%" $minAvailable }}
+{{- /* `int "abc"` is 0, so an invalid percentage like "abc%" would pass the <100%
+       check below and render `minAvailable: abc%` for the API server to reject at
+       apply time. Assert the numeric portion is integral first so the error is a
+       fail-fast render error with context, not a late admission rejection. */ -}}
+{{- include "argocd-extension-backend-api.assertIntegral" (list "podDisruptionBudget.minAvailable (percentage)" $pct) }}
+{{- /* The apiserver IntOrString percent validation is `^([0-9]+)%$`, so a negative
+       percent (assertIntegral accepts "-50") renders but is rejected at admission.
+       Fail fast on it too, alongside the >=100% deadlock case. */ -}}
+{{- if lt (int $pct) 0 }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be a non-negative percentage" $minAvailable) }}
+{{- end }}
+{{- if ge (int $pct) 100 }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than 100%%, otherwise no voluntary disruption is ever permitted and node drains hang" $minAvailable) }}
+{{- end }}
+{{- else }}
+{{- include "argocd-extension-backend-api.assertIntegral" (list "podDisruptionBudget.minAvailable" $minAvailable) }}
+{{- if lt (int $minAvailable) 0 }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be non-negative" $minAvailable) }}
+{{- end }}
+{{- if ge (int $minAvailable) (int .Values.replicaCount) }}
+{{- fail (printf "podDisruptionBudget.minAvailable (%v) must be less than replicaCount (%v), otherwise no voluntary disruption is ever permitted and node drains hang" $minAvailable .Values.replicaCount) }}
+{{- end }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "argocd-extension-backend-api.fullname" . | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "argocd-extension-backend-api.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "argocd-extension-backend-api.selectorLabels" . | nindent 6 }}
+{{- end }}

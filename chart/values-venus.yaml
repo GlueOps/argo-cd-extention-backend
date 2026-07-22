@@ -1,0 +1,46 @@
+# Environment overrides matching manifests/venus-backend.yaml.
+# Install into the `glueops-core` namespace (serves the `nonprod` Argo CD
+# Application namespace):
+#   helm install argocd-extension-backend-api chart/ -n glueops-core -f chart/values-venus.yaml
+
+# The namespace allowlist gates two axes; here they differ, so set them
+# explicitly instead of a single allowedNamespaces:
+#  - allowedAppNamespaces: the Application-CR namespace (Argocd-Application-Name
+#    header prefix). Applications live in argocd/glueops-core, so gating on
+#    "nonprod" would 403 every request.
+#  - allowedDestNamespaces: spec.destination.namespace, where workload/
+#    ExternalSecret reads happen. RBAC (templates/rbac.yaml) scopes the
+#    Role/RoleBinding to this, so it stays confined to "nonprod".
+allowedNamespaces: "nonprod"
+allowedAppNamespaces: "argocd,glueops-core"
+allowedDestNamespaces: "nonprod"
+
+env:
+  prometheusBaseUrl: "http://kps-prometheus.glueops-core-kube-prometheus-stack.svc.cluster.local:9090"
+  tempoBaseUrl: ""
+  grafanaBaseUrl: "https://grafana.nonprod.venus.onglueops.rocks"
+  vaultBaseUrl: "https://vault.nonprod.venus.onglueops.rocks"
+  # MUST equal the repoURL of the Application source that its `$values` valueFiles
+  # reference, or the config-derived Vault links are silently dropped: the backend
+  # only reads value files from THIS repo (a confused-deputy guard -- otherwise it
+  # would send GITHUB_TOKEN to any repo an Application happens to name). Verify with:
+  #   kubectl get applications -n glueops-core -o json | \
+  #     jq -r '.items[].spec.sources[]? | select(.ref) | .repoURL' | sort -u
+  # On a captain/venus-shaped cluster this is the per-tenant configurations repo
+  # (e.g. development-tenant-venus/deployment-configurations), NOT this GlueOps one.
+  #
+  # The live-ExternalSecret path is independent of this and works regardless; only
+  # secrets derived by reading value files depend on it. That path additionally needs
+  # githubToken below when the repo is private.
+  deploymentConfigRepoUrl: "https://github.com/GlueOps/deployment-configurations"
+
+# The tenant deployment-configurations repo is private, so reading value files from
+# it (for config-derived Vault links) requires a token. Without this, that path
+# returns nothing -- silently, since a failed read degrades to "no links".
+# Create the Secret first, then uncomment:
+# githubToken:
+#   existingSecretName: "argocd-extension-backend-api-github"
+#   existingSecretKey: "token"
+
+networkPolicy:
+  enabled: true

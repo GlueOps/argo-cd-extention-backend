@@ -1,0 +1,156 @@
+{{- if .Values.rbac.create }}
+{{- $saName := include "argocd-extension-backend-api.serviceAccountName" . }}
+{{- $rbacName := include "argocd-extension-backend-api.rbacName" . }}
+{{- $labels := include "argocd-extension-backend-api.labels" . }}
+{{- $rbacNamespaces := include "argocd-extension-backend-api.rbacNamespaces" . }}
+---
+# -----------------------------------------------------------------------------
+# argoproj.io Applications: get + list, granted CLUSTER-WIDE (always).
+#
+# src/server.js's getArgoApplication() first tries a namespaced get() against
+# the request's namespace, then falls back to a cluster-wide
+# listClusterCustomObject() when that misses. That
+# fallback only succeeds with a ClusterRole, so Applications get/list is
+# granted cluster-wide here regardless of .Values.allowedNamespaces (a
+# namespace-scoped Role cannot authorize a cluster-wide list). Argo CD
+# Applications describe *what* is deployed (source/destination), not secret
+# material, so this is treated as acceptable read access even in
+# multi-tenant clusters.
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $rbacName }}-applications
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $rbacName }}-applications
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $rbacName }}-applications
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName | quote }}
+    namespace: {{ .Release.Namespace | quote }}
+{{- if eq (trim $rbacNamespaces) "*" }}
+---
+# -----------------------------------------------------------------------------
+# CLUSTER-WIDE RBAC NOTE
+#
+# .Values.allowedNamespaces is "*", so the workload-discovery permissions
+# below are granted CLUSTER-WIDE via a ClusterRole instead of a per-namespace
+# Role. src/server.js does NOT read Secrets; it lists
+# Deployments/StatefulSets/DaemonSets and ExternalSecrets to resolve workload
+# names and Vault secret paths, plus Pods (list only) to resolve one live pod
+# name per workload for the Grafana POD Overview link. Pod specs can carry
+# plaintext env vars, so granting this cluster-wide is a real widening — prefer
+# setting `allowedNamespaces` to a bounded comma-separated list (e.g.
+# "argocd" or "team-a,team-b") so this chart creates a scoped Role +
+# RoleBinding per namespace instead (see the else-branch below), keeping this
+# ServiceAccount's read access confined to only the namespaces it serves.
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $rbacName }}-workloads
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["list"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["list"]
+  # pods:list resolves ONE live pod name per workload to fill the Grafana POD
+  # Overview dashboard's var-pod. It is best-effort in src/server.js: without this
+  # grant the list 403s, the backend swallows it, and the dashboard falls back to
+  # auto-selecting a pod. Pod objects can carry plaintext env vars, so this widens
+  # read scope beyond workload metadata — keep allowedNamespaces bounded so this
+  # stays a namespaced Role rather than a cluster-wide grant (see note above).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $rbacName }}-workloads
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $rbacName }}-workloads
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName | quote }}
+    namespace: {{ .Release.Namespace | quote }}
+{{- else }}
+{{- range $ns := (splitList "," $rbacNamespaces) }}
+{{- $ns := trim $ns }}
+{{- /* Skip empty entries and a stray "*" list item (a namespace literally named
+       "*" is invalid; a bare "*" would have taken the ClusterRole branch above). */ -}}
+{{- if and $ns (ne $ns "*") }}
+---
+# -----------------------------------------------------------------------------
+# Least-privilege mode: allowedNamespaces is a bounded list, so a namespaced
+# Role + RoleBinding (granting the same verbs the "*" branch would grant
+# cluster-wide) is created here in namespace "{{ $ns }}" only. This confines
+# workload/ExternalSecret discovery to just the namespace(s) this backend is
+# actually configured to serve -- this is the recommended configuration;
+# keep allowedNamespaces bounded whenever possible.
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $rbacName }}-workloads
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["list"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["list"]
+  # pods:list resolves ONE live pod name per workload to fill the Grafana POD
+  # Overview dashboard's var-pod. It is best-effort in src/server.js: without this
+  # grant the list 403s, the backend swallows it, and the dashboard falls back to
+  # auto-selecting a pod. Pod objects can carry plaintext env vars, so this widens
+  # read scope beyond workload metadata — keep allowedNamespaces bounded so this
+  # stays a namespaced Role rather than a cluster-wide grant (see note above).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $rbacName }}-workloads
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $rbacName }}-workloads
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName | quote }}
+    namespace: {{ $.Release.Namespace | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
