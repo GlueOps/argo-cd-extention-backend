@@ -158,6 +158,23 @@ const GRAFANA_K8S_POD_DASHBOARD = (process.env.GRAFANA_K8S_POD_DASHBOARD || '').
 // clusters that share namespace/workload names (otherwise the link is ambiguous).
 const CLUSTER_NAME = (process.env.CLUSTER_NAME || '').trim();
 
+// Static links surfaced under the "Other" category (constant across clusters, so
+// they carry sensible GlueOps defaults but remain env-overridable per install).
+// A trimmed-empty value drops just that one link; both empty => no static Other links.
+const SUPPORT_URL = ((process.env.SUPPORT_URL ?? 'https://support.glueops.dev').trim());
+const DOCUMENTATION_URL = ((process.env.DOCUMENTATION_URL ?? 'https://docs.glueops.dev').trim());
+
+// Argo CD projects the extension does NOT serve. A request whose Argocd-Project-Name
+// matches one of these returns an empty (200) response instead of tenant links — this
+// is how platform/core Applications (project "glueops-core") are excluded, replacing
+// the previous reliance on destination-namespace filtering to hide them. Use ?? so an
+// explicitly empty value disables the skip entirely (serves every project); the
+// default excludes the platform project.
+const SKIP_PROJECTS = new Set(
+  (process.env.SKIP_PROJECTS ?? 'glueops-core')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+
 // Upper bound on the number of distinct config-repo value files read per /api/links
 // request. valueFiles comes from the (untrusted, uncapped) Application spec and each
 // entry is a token-authenticated GitHub fetch, so an app declaring hundreds of them
@@ -179,7 +196,7 @@ assertHttpBaseUrl('GRAFANA_BASE_URL', GRAFANA_BASE_URL);
 assertHttpBaseUrl('VAULT_BASE_URL', VAULT_BASE_URL);
 assertHttpBaseUrl('DEPLOYMENT_CONFIG_REPO_URL', DEPLOYMENT_CONFIG_REPO_URL);
 
-console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)} ALLOWED_APP_NAMESPACES=${JSON.stringify(ALLOWED_APP_NAMESPACES)} ALLOWED_DEST_NAMESPACES=${JSON.stringify(ALLOWED_DEST_NAMESPACES)}`);
+console.log(`[CONFIG] PORT=${PORT} REQUEST_TIMEOUT_MS=${REQUEST_TIMEOUT_MS} TEMPO_SEARCH_PATH=${JSON.stringify(TEMPO_SEARCH_PATH)} ALLOWED_APP_NAMESPACES=${JSON.stringify(ALLOWED_APP_NAMESPACES)} ALLOWED_DEST_NAMESPACES=${JSON.stringify(ALLOWED_DEST_NAMESPACES)} SKIP_PROJECTS=${JSON.stringify([...SKIP_PROJECTS])}`);
 
 function logDebug(message, meta) {
   if (LOG_LEVEL === 'DEBUG') {
@@ -187,10 +204,15 @@ function logDebug(message, meta) {
   }
 }
 
-// Initialize Kubernetes client (in-cluster config). Only AppsV1 (workload listing)
-// and CustomObjects (Applications + ExternalSecrets) are needed for link resolution.
+// Initialize Kubernetes client (in-cluster config). AppsV1 (workload listing),
+// CustomObjects (Applications + ExternalSecrets), and CoreV1 (a single pod name per
+// workload, used only to fill the POD Overview dashboard's var-pod) are needed for
+// link resolution. CoreV1 pod reads degrade gracefully: if the ServiceAccount lacks
+// pods:list (or none match), var-pod is simply omitted and the dashboard auto-selects
+// a live pod, exactly as before this capability existed.
 let k8sAppsApi = null;
 let k8sCustomObjectsApi = null;
+let k8sCoreApi = null;
 try {
   const kc = new k8s.KubeConfig();
   kc.loadFromCluster();
@@ -204,6 +226,7 @@ try {
   }
   k8sAppsApi = kc.makeApiClient(k8s.AppsV1Api);
   k8sCustomObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi);
+  k8sCoreApi = kc.makeApiClient(k8s.CoreV1Api);
   logDebug('Kubernetes client initialized');
 } catch (err) {
   logDebug('Kubernetes client initialization failed (running outside cluster?)', err.message);
@@ -217,6 +240,7 @@ function __setK8sClientsForTest(clients) {
   if (clients && typeof clients === 'object') {
     if ('appsApi' in clients) k8sAppsApi = clients.appsApi;
     if ('customObjectsApi' in clients) k8sCustomObjectsApi = clients.customObjectsApi;
+    if ('coreApi' in clients) k8sCoreApi = clients.coreApi;
   }
 }
 
@@ -568,7 +592,12 @@ function buildGrafanaTracesUrl(namespace, workloadName) {
 // label_values(service_name), and POD Overview's var-workload resolves from
 // label_values(kube_pod_labels, label_app_kubernetes_io_name) -- both of which
 // carry the workload name verbatim on this platform.
-function buildPlatformDashboardLinks(namespace, workloadName) {
+//
+// podName (optional) fills the POD Overview dashboard's var-pod so the link lands on a
+// specific, currently-live pod (see getPodForWorkload). It is best-effort: when unknown
+// (pod read unavailable/denied, or no matching pod) var-pod is omitted and the dashboard
+// auto-selects a pod from the selected workload — the prior behavior.
+function buildPlatformDashboardLinks(namespace, workloadName, podName) {
   if (!GRAFANA_BASE_URL) return [];
   const links = [];
 
@@ -594,17 +623,25 @@ function buildPlatformDashboardLinks(namespace, workloadName) {
   if (GRAFANA_K8S_POD_DASHBOARD && workloadName) {
     const url = buildGrafanaDashboardUrl(GRAFANA_K8S_POD_DASHBOARD, {
       orgId: '1',
+      // A recent, auto-refreshing window so the pod view lands on live data rather
+      // than the dashboard's saved default range (matches the operator-facing URL).
+      from: 'now-5m',
+      to: 'now',
+      timezone: 'utc',
+      refresh: '10s',
       'var-datasource': GRAFANA_PROMETHEUS_DS_UID || 'default',
       // This dashboard declares var-cluster as a query variable; omit it rather
       // than sending an empty value, which would override its own default.
       'var-cluster': CLUSTER_NAME || undefined,
       'var-namespace': namespace || '',
-      'var-workload': workloadName
-      // var-pod is deliberately NOT set. It is a single-value query variable
-      // resolving to a concrete pod name
-      // (label_values(kube_pod_labels{label_app_kubernetes_io_name="$workload"}, pod)),
-      // so a regex or a stale pod name selects nothing. Leaving it unset lets the
-      // dashboard pick a live pod from the workload we did select.
+      'var-workload': workloadName,
+      // var-pod is a single-value query variable resolving to a concrete pod name
+      // (label_values(kube_pod_labels{label_app_kubernetes_io_name="$workload"}, pod)).
+      // We only set it when we resolved a currently-live pod for this workload; a
+      // regex or a stale name would select nothing. When unknown it is omitted
+      // (undefined => dropped by buildGrafanaDashboardUrl) and the dashboard
+      // auto-selects a live pod from the workload we already selected.
+      'var-pod': podName || undefined
     });
     if (url) links.push({ url, label: 'Kubernetes POD Overview', scope: 'workload' });
   }
@@ -625,26 +662,37 @@ function dedupeLinksByUrl(links) {
   return Array.from(byUrl.values());
 }
 
-// Assemble the `dashboards` category links for a set of workloads. A workload-scoped
-// dashboard (APM var-app, POD var-workload) is distinct per workload, so its label is
-// qualified with the workload name when there are several. A namespace-scoped dashboard
-// (Kubernetes Overview) is identical across workloads WITHIN a namespace (deduped by
-// URL) but differs ACROSS namespaces, so it is qualified with the namespace when
-// workloads span several — otherwise two distinct-namespace links would collide on one
-// ambiguous "Kubernetes Overview" label. Pure + exported so the labeling rule is
-// unit-testable.
+// Assemble the dashboard links for a set of workloads (surfaced under the "Other"
+// category). A workload-scoped dashboard (APM var-app, POD var-workload) is distinct
+// per workload, so its label is qualified with the workload name when there are
+// several. A namespace-scoped dashboard (Kubernetes Overview) is identical across
+// workloads WITHIN a namespace (deduped by URL) but differs ACROSS namespaces, so it
+// is qualified with the namespace when workloads span several — otherwise two
+// distinct-namespace links would collide on one ambiguous "Kubernetes Overview" label.
+// Each workload may carry a resolved `pod` name (getPodForWorkload) that fills the POD
+// Overview var-pod. Pure + exported so the labeling rule is unit-testable.
 function buildDashboardCategoryLinks(workloads, destinationNamespace) {
   const multipleWorkloads = workloads.length > 1;
   const multipleNamespaces = new Set(workloads.map(w => w.namespace || destinationNamespace)).size > 1;
   return dedupeLinksByUrl(workloads.flatMap(w => {
     const ns = w.namespace || destinationNamespace;
-    return buildPlatformDashboardLinks(ns, w.name).map(link => {
+    return buildPlatformDashboardLinks(ns, w.name, w.pod).map(link => {
       let label = link.label;
       if (link.scope === 'workload' && multipleWorkloads) label = `${link.label} — ${w.name}`;
       else if (link.scope === 'namespace' && multipleNamespaces) label = `${link.label} — ${ns}`;
       return { url: link.url, label };
     });
   }));
+}
+
+// Static links for the "Other" category — constant, workload-independent destinations
+// (Support, Documentation). Empty entries are dropped so an operator can disable one by
+// setting its env var to "". Exported for unit testing the enable/disable behavior.
+function buildOtherStaticLinks() {
+  return [
+    { url: SUPPORT_URL, label: 'Support' },
+    { url: DOCUMENTATION_URL, label: 'Documentation' }
+  ].filter(link => link.url);
 }
 
 function labelFromSecretPath(secretPath) {
@@ -1112,6 +1160,32 @@ async function getAppResources(namespace, appName) {
   return workloads;
 }
 
+// Resolve one currently-live pod name for a workload, used only to fill the POD
+// Overview dashboard's var-pod. Best-effort and non-fatal: returns '' when the CoreV1
+// client is unavailable, the ServiceAccount lacks pods:list, the call times out, or
+// nothing matches — every caller treats '' as "omit var-pod" and lets the dashboard
+// auto-select. Pods are matched on app.kubernetes.io/name=<workload>, the same label
+// the dashboard's var-pod query keys on (label_app_kubernetes_io_name); a Running pod
+// is preferred over one that is pending/terminating.
+async function getPodForWorkload(namespace, workloadName) {
+  if (!k8sCoreApi || !namespace || !workloadName) return '';
+  try {
+    // 0.22 positional API: (namespace, pretty, allowWatchBookmarks, _continue,
+    // fieldSelector, labelSelector). Only the label selector is needed here.
+    const resp = await withTimeout(
+      k8sCoreApi.listNamespacedPod(namespace, undefined, undefined, undefined, undefined,
+        `app.kubernetes.io/name=${workloadName}`),
+      `getPodForWorkload(${namespace}/${workloadName})`
+    );
+    const items = resp && resp.body && Array.isArray(resp.body.items) ? resp.body.items : [];
+    const chosen = items.find(p => p && p.status && p.status.phase === 'Running') || items[0];
+    return chosen && chosen.metadata && typeof chosen.metadata.name === 'string' ? chosen.metadata.name : '';
+  } catch (err) {
+    logDebug('getPodForWorkload lookup failed', { namespace, workloadName, message: err.message });
+    return '';
+  }
+}
+
 function buildQueryString(query) {
   // Preserve multi-value params (?tags=a&tags=b) instead of collapsing them to
   // a single comma-joined value, and drop anything that can't be represented as
@@ -1302,6 +1376,32 @@ app.get('/api/links', asyncHandler(async (req, res) => {
     });
   }
 
+  // Project-based exclusion: platform/core Applications (project "glueops-core" by
+  // default, via SKIP_PROJECTS) are not served by this extension. Return a clean,
+  // empty 200 — a benign "not applicable" tab rather than tenant links — and
+  // short-circuit before any Application resolution or k8s reads. This replaces
+  // hiding these apps by destination-namespace filtering. Only matched when the
+  // project header is present; an absent/empty header does not skip.
+  if (projectName && SKIP_PROJECTS.has(projectName)) {
+    logDebug('project excluded from extension', { namespace, appName, projectName });
+    return res.status(200).json({
+      status: 'ok',
+      warnings: [],
+      categories: [{
+        id: 'not-applicable',
+        label: 'Not Applicable',
+        icon: 'ℹ️',
+        status: 'empty',
+        links: [],
+        message: `The GlueOps links extension is not enabled for project "${projectName}"`
+      }],
+      metadata: {
+        last_updated: new Date().toISOString(),
+        max_rows: 4
+      }
+    });
+  }
+
   logDebug('links request', { namespace, appName, projectName });
 
   const appObj = await getArgoApplication(namespace, appName);
@@ -1375,6 +1475,18 @@ app.get('/api/links', asyncHandler(async (req, res) => {
     warnings.push('workload names could not be discovered; links use the application name as a best-effort guess');
   }
 
+  // Resolve one live pod per workload to fill the POD Overview var-pod. Only worth
+  // doing when that dashboard is configured and the destination is on THIS cluster
+  // (pods for a remote destination aren't visible here). Best-effort: getPodForWorkload
+  // returns '' on any failure/denial, and buildPlatformDashboardLinks omits var-pod for
+  // an empty pod — so this never blocks or breaks the links, it only enriches them.
+  // Done concurrently, each already timeout-bounded, so it adds at most one timeout.
+  if (GRAFANA_BASE_URL && GRAFANA_K8S_POD_DASHBOARD && !isRemoteDestination && !workloadsInferred) {
+    await Promise.all(workloads.map(async w => {
+      w.pod = await getPodForWorkload(w.namespace || destinationNamespace, w.name);
+    }));
+  }
+
   // Secret links come only from ExternalSecret remoteRef keys (real Vault paths).
   // Skip that work entirely when Vault isn't configured (the results are only used
   // in the `if (VAULT_BASE_URL)` block below) to avoid needless k8s/GitHub load.
@@ -1387,6 +1499,10 @@ app.get('/api/links', asyncHandler(async (req, res) => {
 
   const workloadStatus = workloadsInferred ? 'degraded' : 'ok';
   const categories = [];
+  // Grafana dashboards go under "Other" alongside the static Support/Documentation
+  // links; collected here so the category can be emitted once, below, even when
+  // Grafana is unset (static links still apply).
+  let dashboardLinks = [];
 
   if (GRAFANA_BASE_URL) {
     const logsLinks = dedupeLinksByUrl(workloads
@@ -1410,10 +1526,17 @@ app.get('/api/links', asyncHandler(async (req, res) => {
       categories.push({ id: 'metrics', label: 'Metrics', icon: '📈', status: workloadStatus, links: metricsLinks });
     }
 
-    const dashboardLinks = buildDashboardCategoryLinks(workloads, destinationNamespace);
-    if (dashboardLinks.length > 0) {
-      categories.push({ id: 'dashboards', label: 'Dashboards', icon: '📊', status: workloadStatus, links: dashboardLinks });
-    }
+    dashboardLinks = buildDashboardCategoryLinks(workloads, destinationNamespace);
+  }
+
+  // "Other": Grafana dashboards (workload-derived) followed by the static, cluster-wide
+  // Support/Documentation links. Emitted whenever either is present, so the static
+  // links show even on clusters without Grafana. Deduped by URL for consistency with
+  // the other categories. Status reflects dashboard-link provenance only (static links
+  // are always ok), matching the previous Dashboards category's status semantics.
+  const otherLinks = dedupeLinksByUrl([...dashboardLinks, ...buildOtherStaticLinks()]);
+  if (otherLinks.length > 0) {
+    categories.push({ id: 'other', label: 'Other', icon: '🔗', status: workloadStatus, links: otherLinks });
   }
 
   if (VAULT_BASE_URL) {
@@ -1661,6 +1784,7 @@ module.exports = {
   buildGrafanaTracesUrl,
   buildPlatformDashboardLinks,
   buildDashboardCategoryLinks,
+  buildOtherStaticLinks,
   escapeRegexLiteral,
   dedupeLinksByUrl,
   __setK8sClientsForTest

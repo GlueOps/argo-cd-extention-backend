@@ -150,6 +150,25 @@ test('the project gate only applies when Argo CD actually sends the header', asy
   assert.equal((await links('proj-team-a')).status, 200);
 });
 
+// --- Project-based exclusion (SKIP_PROJECTS, default "glueops-core") ----------
+
+test('a skipped project (glueops-core) returns 200 with a not-applicable state and no tenant links', async () => {
+  // The skip fires before Application resolution, so it short-circuits regardless of
+  // the app's own stored project — no Grafana/tenant links may leak into the response.
+  const res = await links('in-scope', 'glueops-core');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.status, 'ok');
+  assert.deepEqual(body.categories.map(c => c.id), ['not-applicable']);
+  assert.deepEqual(body.categories[0].links, []);
+  assert.ok(!JSON.stringify(body).includes('grafana.example.com'), 'no tenant links leak on a skipped project');
+});
+
+test('a non-skipped project is served normally (the skip is exact-match, not a prefix)', async () => {
+  // "glueops-core-something" must NOT be treated as the skipped "glueops-core".
+  assert.equal((await links('proj-team-a', 'team-a')).status, 200);
+});
+
 test('metrics links omit var-cluster entirely when CLUSTER_NAME is unset', async () => {
   // An explicit `var-cluster=` would override the dashboard's own default selection;
   // the single-cluster default must leave the template var alone.

@@ -50,14 +50,24 @@ test('GET /api/links sets no-store + Vary and always returns a links array per c
   assert.match(res.headers.get('vary') || '', /Argocd-Application-Name/);
 
   const body = await res.json();
-  // No services configured + app unresolved => degraded with a single, safe empty state.
+  // App unresolved (no in-cluster client) => degraded. No Grafana/Vault configured, but
+  // the static Support/Documentation links are always present, so the response surfaces
+  // an "Other" category rather than the empty "unconfigured" placeholder.
   assert.equal(body.status, 'degraded');
   assert.ok(Array.isArray(body.warnings));
   assert.ok(Array.isArray(body.categories) && body.categories.length >= 1);
   for (const cat of body.categories) {
     assert.ok(Array.isArray(cat.links), `category ${cat.id} must expose a links array`);
   }
-  assert.equal(body.categories[0].id, 'unconfigured');
+  const other = body.categories.find(c => c.id === 'other');
+  assert.ok(other, 'Other category present from the default static links');
+  assert.deepEqual(other.links.map(l => l.label), ['Support', 'Documentation']);
+  assert.deepEqual(
+    other.links.map(l => l.url),
+    ['https://support.glueops.dev', 'https://docs.glueops.dev']
+  );
+  // With a non-empty Other category, the empty-state placeholder must NOT appear.
+  assert.equal(body.categories.some(c => c.id === 'unconfigured'), false);
 });
 
 test('unknown route returns the shared 404 error envelope', async () => {

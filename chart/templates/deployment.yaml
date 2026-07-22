@@ -210,6 +210,23 @@ spec:
             - name: GRAFANA_K8S_POD_DASHBOARD
               value: {{ .Values.env.grafanaK8sPodDashboard | quote }}
             {{- end }}
+            {{- /* Static "Other" category links + project exclusion. Each uses `?? default`
+                   in the server, so rendering only-when-set keeps the app's own defaults
+                   (support/docs URLs, skip glueops-core). Use `hasKey` so an operator can
+                   force-DISABLE one with an explicit "" (which fails closed / disables the
+                   skip) -- a plain truthiness guard could never emit that empty value. */ -}}
+            {{- if hasKey .Values.env "supportUrl" }}
+            - name: SUPPORT_URL
+              value: {{ .Values.env.supportUrl | quote }}
+            {{- end }}
+            {{- if hasKey .Values.env "documentationUrl" }}
+            - name: DOCUMENTATION_URL
+              value: {{ .Values.env.documentationUrl | quote }}
+            {{- end }}
+            {{- if hasKey .Values.env "skipProjects" }}
+            - name: SKIP_PROJECTS
+              value: {{ .Values.env.skipProjects | quote }}
+            {{- end }}
             {{- /* Escape hatch for any env var not modeled above (e.g. a new server
                    knob), so the chart never has to be forked just to set one. */ -}}
             {{- if and .Values.extraEnv (not (kindIs "slice" .Values.extraEnv)) }}

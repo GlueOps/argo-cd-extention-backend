@@ -50,10 +50,12 @@ subjects:
 # the actual workload/ExternalSecret discovery calls in src/server.js only
 # ever target "nonprod". (The Application CRs themselves live in argocd/
 # glueops-core -- see ALLOWED_APP_NAMESPACES -- and are read cluster-wide.)
-# src/server.js does NOT read Secret or Pod objects
-# -- no core "" RBAC is requested at all -- it only lists
-# Deployments/StatefulSets/DaemonSets and ExternalSecrets to resolve
-# workload names and Vault secret paths. Scoping this Role to "nonprod"
+# src/server.js does NOT read Secret objects. It lists
+# Deployments/StatefulSets/DaemonSets and ExternalSecrets to resolve workload
+# names and Vault secret paths, plus Pods (list only) to resolve one live pod
+# name per workload for the Grafana POD Overview link (var-pod). Pod reads are
+# best-effort: without the pods grant the list 403s, the backend swallows it,
+# and the dashboard auto-selects a pod instead. Scoping this Role to "nonprod"
 # instead of cluster-wide keeps this ServiceAccount's read access confined
 # to just this namespace.
 # -----------------------------------------------------------------------------
@@ -70,6 +72,9 @@ rules:
     verbs: ["list"]
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

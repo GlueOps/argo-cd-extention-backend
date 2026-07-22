@@ -76,12 +76,42 @@ test('platform dashboards key each dashboard on the vars it actually declares', 
   assert.match(links[2].url, /\/d\/ce60j8f8umhhcc/);
   assert.equal(pod.get('var-namespace'), 'nonprod');
   assert.equal(pod.get('var-workload'), 'checkout');
-  // var-pod resolves to a concrete pod name from $workload; sending a regex or a
-  // stale pod would select nothing, so it must be omitted entirely.
+  // The POD Overview link carries a recent auto-refreshing window regardless of pod.
+  assert.equal(pod.get('from'), 'now-5m');
+  assert.equal(pod.get('to'), 'now');
+  assert.equal(pod.get('timezone'), 'utc');
+  assert.equal(pod.get('refresh'), '10s');
+  // No pod name passed here: var-pod must be omitted (a regex or stale pod selects
+  // nothing) so the dashboard auto-selects a live pod from the workload.
   assert.equal(pod.has('var-pod'), false);
   // CLUSTER_NAME is unset here: the var must be OMITTED, not sent empty, or it
   // overrides the dashboard's own default selection.
   assert.equal(pod.has('var-cluster'), false);
+});
+
+test('POD Overview sets var-pod to the resolved live pod when one is provided', () => {
+  const links = buildPlatformDashboardLinks('nonprod', 'checkout', 'checkout-c8879b4f8-jgl2c');
+  const pod = paramsOf(links.find(l => l.label === 'Kubernetes POD Overview').url);
+  assert.equal(pod.get('var-pod'), 'checkout-c8879b4f8-jgl2c');
+  assert.equal(pod.get('var-workload'), 'checkout');
+  // Only the POD dashboard consumes a pod name; APM/Overview are unaffected.
+  const apm = paramsOf(links.find(l => l.label === 'APM Overview').url);
+  assert.equal(apm.has('var-pod'), false);
+});
+
+test('an empty resolved pod name leaves var-pod omitted (graceful degrade)', () => {
+  const links = buildPlatformDashboardLinks('nonprod', 'checkout', '');
+  const pod = paramsOf(links.find(l => l.label === 'Kubernetes POD Overview').url);
+  assert.equal(pod.has('var-pod'), false);
+});
+
+test('dashboard category threads each workload\'s resolved pod into its POD Overview link', () => {
+  const links = buildDashboardCategoryLinks(
+    [{ name: 'web', namespace: 'nonprod', pod: 'web-abc-1' }],
+    'nonprod'
+  );
+  const pod = paramsOf(links.find(l => l.label === 'Kubernetes POD Overview').url);
+  assert.equal(pod.get('var-pod'), 'web-abc-1');
 });
 
 test('workload-keyed dashboards drop out when there is no workload', () => {

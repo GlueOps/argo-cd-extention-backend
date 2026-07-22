@@ -102,7 +102,20 @@ env:
   # Empty => that dashboard link is dropped. Set on clusters that have them.
   grafanaApmDashboard: ""
   grafanaK8sOverviewDashboard: ""
+  # Setting a POD dashboard UID also opts the backend into resolving one live pod
+  # per workload (var-pod), which requires the pods:list RBAC in templates/rbac.yaml.
   grafanaK8sPodDashboard: ""
+  # Static links shown under the "Other" category (constant across clusters). These
+  # keys are COMMENTED OUT so the server's own defaults apply
+  # (https://support.glueops.dev, https://docs.glueops.dev). Uncomment to override;
+  # set to "" to hide that single link.
+  # supportUrl: "https://support.glueops.dev"
+  # documentationUrl: "https://docs.glueops.dev"
+  # Comma-separated Argo CD projects the extension does NOT serve; a request whose
+  # Argocd-Project-Name matches returns an empty "not applicable" response. Commented
+  # out so the server default ("glueops-core", i.e. hide platform/core apps) applies.
+  # Set to "" to serve every project.
+  # skipProjects: "glueops-core"
 
 # Additional raw environment variables appended verbatim to the container, for
 # any server knob not modeled under `env` above. Must be a LIST of standard

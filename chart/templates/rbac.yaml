@@ -49,10 +49,12 @@ subjects:
 #
 # .Values.allowedNamespaces is "*", so the workload-discovery permissions
 # below are granted CLUSTER-WIDE via a ClusterRole instead of a per-namespace
-# Role. src/server.js does NOT read Secret or Pod objects (no core "" RBAC is
-# requested at all); it only lists Deployments/StatefulSets/DaemonSets and
-# ExternalSecrets to resolve workload names and Vault secret paths. Even so,
-# prefer setting `allowedNamespaces` to a bounded comma-separated list (e.g.
+# Role. src/server.js does NOT read Secrets; it lists
+# Deployments/StatefulSets/DaemonSets and ExternalSecrets to resolve workload
+# names and Vault secret paths, plus Pods (list only) to resolve one live pod
+# name per workload for the Grafana POD Overview link. Pod specs can carry
+# plaintext env vars, so granting this cluster-wide is a real widening — prefer
+# setting `allowedNamespaces` to a bounded comma-separated list (e.g.
 # "argocd" or "team-a,team-b") so this chart creates a scoped Role +
 # RoleBinding per namespace instead (see the else-branch below), keeping this
 # ServiceAccount's read access confined to only the namespaces it serves.
@@ -69,6 +71,15 @@ rules:
     verbs: ["list"]
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets"]
+    verbs: ["list"]
+  # pods:list resolves ONE live pod name per workload to fill the Grafana POD
+  # Overview dashboard's var-pod. It is best-effort in src/server.js: without this
+  # grant the list 403s, the backend swallows it, and the dashboard falls back to
+  # auto-selecting a pod. Pod objects can carry plaintext env vars, so this widens
+  # read scope beyond workload metadata — keep allowedNamespaces bounded so this
+  # stays a namespaced Role rather than a cluster-wide grant (see note above).
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -113,6 +124,15 @@ rules:
     verbs: ["list"]
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets"]
+    verbs: ["list"]
+  # pods:list resolves ONE live pod name per workload to fill the Grafana POD
+  # Overview dashboard's var-pod. It is best-effort in src/server.js: without this
+  # grant the list 403s, the backend swallows it, and the dashboard falls back to
+  # auto-selecting a pod. Pod objects can carry plaintext env vars, so this widens
+  # read scope beyond workload metadata — keep allowedNamespaces bounded so this
+  # stays a namespaced Role rather than a cluster-wide grant (see note above).
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
