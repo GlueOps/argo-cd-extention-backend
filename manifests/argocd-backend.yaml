@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: argocd-extension-backend-api
-          image: ghcr.io/glueops/argocd-extension-backend-api:v.0.0.1
+          image: ghcr.io/glueops/argocd-extension-backend-api:v.0.0.1@sha256:fefde17e4a2223eea3a94ab4a864cfb40a340c6ce8b3b3ad578ef5a0154adfe3
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
