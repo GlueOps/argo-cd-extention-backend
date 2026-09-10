@@ -1,18 +1,23 @@
 {
   "name": "argocd-extension-backend-api",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "private": true,
   "description": "Backend API for the Argo CD extension",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "pretest": "node -e \"const f=require('node:fs').readdirSync('test').filter(n=>n.endsWith('.test.js')); if(!f.length) throw new Error('no *.test.js files found in test/'); console.log('discovered '+f.length+' test files')\"",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
     "express": "^4.21.2",
     "@kubernetes/client-node": "^0.22.0",
     "js-yaml": "^4.1.0"
+  },
+  "overrides": {
+    "form-data": "^2.5.6"
   }
 }

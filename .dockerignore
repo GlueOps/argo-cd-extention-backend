@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.git
+.github
+manifests
+chart
+test
+*.test.js
+.gitignore
+.dockerignore
+README.md
+CONFIGURATION.md

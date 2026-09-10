@@ -1,0 +1,62 @@
+name: Validate
+
+# Runs the Node test suite and schema-validates the raw manifests on every PR.
+# kubeconform exists here because a spec can be well-formed YAML yet rejected by
+# the API server (e.g. a NetworkPolicy `namespaceSelector` missing its
+# `matchLabels:` wrapper); -strict catches that statically, with no cluster.
+#
+# There is no chart to render: Helm deployment lives in the platform chart
+# (GlueOps/platform-helm-chart-platform), which uses the shared `app` chart.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Pin tool versions for reproducibility.
+  HELM_VERSION: v3.16.2
+  KUBECONFORM_VERSION: v0.8.0
+  # kubeconform validates against schemas for this k8s minor.
+  KUBE_VERSION: "1.30.0"
+
+jobs:
+  # The release workflow also runs the suite, but that gate fires only AFTER the
+  # tag and GitHub Release already exist -- too late to prevent a bad merge, and it
+  # leaves a published release with no image behind it. Run the tests here so they
+  # gate the merge itself.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # `pretest` asserts test files were actually discovered: `node --test` exits 0
+      # when a glob matches nothing, so without it a renamed test/ would pass silently.
+      - run: npm test
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install kubeconform
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Validate raw manifests
+        run: |
+          kubeconform -strict -summary -verbose \
+            -kubernetes-version "${KUBE_VERSION}" \
+            manifests/argocd-backend.yaml manifests/venus-backend.yaml

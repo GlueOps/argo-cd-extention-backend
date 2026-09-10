@@ -2,10 +2,9 @@ backend:
   - changed-files:
       - any-glob-to-any-file:
           - 'src/**'
-          - 'server.js'
           - 'package.json'
           - 'package-lock.json'
-          - 'test-links.js'
+          - 'test/**'
 
 docker:
   - changed-files:
