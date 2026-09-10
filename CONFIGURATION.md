@@ -28,10 +28,14 @@ Newer Grafana ships Logs/Metrics/Traces **Drilldown** as app plugins, served fro
 datasource UID below switches that signal to its Drilldown app; leaving it unset
 keeps the classic dashboard from the table above.
 
-Set these (and the platform dashboards below) via the chart's `env.grafanaLokiDsUid`
-/ `env.grafanaPrometheusDsUid` / `env.grafanaTempoDsUid` / `env.grafanaApmDashboard`
-/ `env.grafanaK8sOverviewDashboard` / `env.grafanaK8sPodDashboard` values (or a raw
-`extraEnv` entry), or as container env vars directly in the raw manifests.
+Set these via the platform chart's `argocd_extension_backend` values --
+`grafana_loki_ds_uid` / `grafana_prometheus_ds_uid` / `grafana_tempo_ds_uid` /
+`grafana_apm_dashboard` / `grafana_k8s_overview_dashboard` /
+`grafana_k8s_pod_dashboard` -- or as container env vars directly in the raw
+manifests. Every one defaults to blank in the chart, because a cluster without the
+OTel monitoring stack has neither the Drilldown plugins nor those dashboards, and a
+non-blank default would point it at 404s. Clusters running the stack set them in
+their `overrides.yaml`.
 
 | Signal | Env (default) | Plugin | Workload filter |
 | --- | --- | --- | --- |
@@ -166,7 +170,11 @@ The backend intentionally does **not** need `secrets` or `pods` permissions.
 > achieve. The remaining verbs *are* scoped to a namespaced `Role`/`RoleBinding`
 > when `allowedDestNamespaces` (or, unset, `allowedNamespaces`) is a bounded list —
 > the reads happen in the destination namespace; only `*` makes them cluster-wide too.
-> The Helm chart applies this split automatically.
+>
+> NOTE: the platform chart does NOT apply that split -- it grants both reads through
+> cluster-scoped ClusterRoles (`glueops-core-argocd-extension-backend-applications`
+> and `-workloads`). The namespaced variant above is only reachable by hand-editing
+> the raw manifests.
 
 ## Workload discovery & degraded responses
 

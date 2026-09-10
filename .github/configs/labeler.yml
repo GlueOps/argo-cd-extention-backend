@@ -21,7 +21,6 @@ deployment:
   - changed-files:
       - any-glob-to-any-file:
           - 'manifests/**'
-          - 'chart/**'
 
 documentation:
   - changed-files:
