@@ -144,7 +144,7 @@ spec:
                     app.kubernetes.io/name: argocd-extension-backend-api
       containers:
         - name: argocd-extension-backend-api
-          # Keep in step with package.json's version and chart/values.yaml: the
+          # Keep in step with package.json's version: the
           # release workflow refuses to publish when the release tag and
           # package.json disagree. Bump all three together.
           image: ghcr.io/glueops/argocd-extension-backend-api:v0.1.4
