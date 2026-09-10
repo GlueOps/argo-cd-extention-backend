@@ -46,23 +46,22 @@ jobs:
           fi
           echo "release tag and package.json agree: $pkg_version"
 
-      # The chart and the raw manifests pin the image tag independently of
-      # package.json, so the check above alone lets them go stale: bump package.json,
-      # cut v0.2.0, and the chart happily keeps deploying the v0.1.1 image with no
-      # error anywhere. README.md tells operators this workflow catches that, so
-      # actually check it rather than relying on all four files being bumped by hand.
-      - name: Chart and manifests pin the released image tag
+      # The raw manifests pin the image tag independently of package.json, so the
+      # check above alone lets them go stale: bump package.json, cut v0.2.0, and a
+      # manifest happily keeps deploying the v0.1.1 image with no error anywhere.
+      # README.md tells operators this workflow catches that, so actually check it
+      # rather than relying on every file being bumped by hand.
+      #
+      # The bespoke chart used to be gated here too. It is gone -- deployment is the
+      # platform chart's shared `app` chart -- and reading chart/values.yaml after
+      # that deletion would fail every release with a missing file.
+      - name: Manifests pin the released image tag
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           image=ghcr.io/glueops/argocd-extension-backend-api
           fail=0
-          chart_tag="$(node -p "require('js-yaml').load(require('fs').readFileSync('chart/values.yaml','utf8')).image.tag")"
-          if [ "$chart_tag" != "$RELEASE_TAG" ]; then
-            echo "::error file=chart/values.yaml::image.tag is '$chart_tag' but the release is '$RELEASE_TAG'"
-            fail=1
-          fi
           # Anchor the tag to end-of-line/whitespace: a plain -F substring match lets a
           # stale pin whose tag has the release tag as a PREFIX (e.g. :v0.1.20 while
           # releasing v0.1.2) false-pass the gate. Escape dots so they match literally.
@@ -75,7 +74,7 @@ jobs:
             fi
           done
           [ "$fail" -eq 0 ] || exit 1
-          echo "chart and manifests pin $image:$RELEASE_TAG"
+          echo "manifests pin $image:$RELEASE_TAG"
 
   build-and-release:
     needs: test
